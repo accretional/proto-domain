@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package resource;
 
-option go_package = "github.com/accretional/proto-resource/pb";
+option go_package = "github.com/accretional/proto-domain/pb";
 
 enum InternetTLD {
   Unknown = 0;
