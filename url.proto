@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package resource;
+
+option go_package = "github.com/accretional/proto-resource/pb";
+
+// helpful: https://en.wikipedia.org/wiki/List_of_URI_schemes
+enum URIScheme {
+  UNKNOWN = 0;
+  HTTP = 1;
+  HTTPS = 2;
+  FILE = 3;
+  FTP = 4;
+  MAILTO = 5;
+  TEL = 6;
+  IMAP = 7;
+  IRC = 8;
+  WS = 9;
+  WSS = 10;
+  // Keep these protocol-level and non-proprietary
+}
+
+message Scheme {
+  oneof format {
+    URIScheme protocol = 1;
+    string custom = 2;
+  }
+}
+
+
+message UserInfo {
+  string username = 1;
+  // Not implementing "password"/credentials yet, maybe never, too much risk that someone will think they need to use it and end up dealing in cleartext passwords accidentally
+  // It's considered deprecated and not commonly used anyway
+}
+
+message IPv4Address {
+  oneof format {
+    string text = 1;
+    sint32 num = 2;
+    // TODO add more
+  }
+}
+
+message IPv6Address {
+  oneof format {
+    string text = 1;
+    // TODO add more
+  }
+}
+
+message Authority {
+  UserInfo user_info = 1;
+  oneof host {
+    Domain hostname = 2;
+    IPv4Address ipv4 = 3;
+    IPv6Address ipv6 = 4;
+  }
+  // leave 0 if unspecified
+  sint32 port = 5;
+}
+
+// TODO
+message QueryParam {
+  string key = 1;
+  string value = 2;
+}
+
+message URL {
+  Scheme scheme = 1;
+  Authority authority = 2;
+  repeated string subpaths = 3;
+  repeated QueryParam query_params = 4;
+  repeated string fragments = 5;
+}
