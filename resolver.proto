@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package resource;
+
+option go_package = "github.com/accretional/proto-domain/pb";
+
+service Resolver {
+  rpc GetDNSRecords(Domain) returns(stream DNSRecord);
+}
