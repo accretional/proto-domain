@@ -1,8 +1,9 @@
 syntax = "proto3";
 
-package resource;
+package domain;
 
 option go_package = "github.com/accretional/proto-domain/pb";
+
 enum DNSRecordType {
   Unknown = 0;
   // Type id 1, RFC 1035. Address record. Returns a 32-bit IPv4 address; most
@@ -251,5 +252,9 @@ message DNSRecord {
   Domain target = 2;
   Class class = 3;
   int32 ttl_seconds = 4;
-  string data = 5;
+  // TODO make indivudal dns record formats typed and oneof {} wrap them
+  oneof format {
+    bytes raw = 5;
+    string text = 6;
+  }
 }
