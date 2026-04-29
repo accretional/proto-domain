@@ -5,21 +5,20 @@ package resource;
 option go_package = "github.com/accretional/proto-domain/pb";
 
 enum InternetTLD {
-  Unknown = 0;
+  None = 0;
   COM = 1;
   // TODO bring em all in
 }
 
 message TLD {
   oneof format {
-    InternetTLD internet_tld = 1;
+    InternetTLD internet = 1;
     string custom  = 2;
   }
 }
 
-// TODO - flesh out
 message Domain {
-  repeated string subdomains = 1;
-  string name = 2;
+  string hostname = 1;
+  repeated string labels = 2;
   TLD tld = 3;
 }
