@@ -3,6 +3,7 @@ syntax = "proto3";
 package resource;
 
 option go_package = "github.com/accretional/proto-resource/pb";
+import "accretional/proto-ip/ip.proto";
 
 // helpful: https://en.wikipedia.org/wiki/List_of_URI_schemes
 enum URIScheme {
@@ -34,27 +35,11 @@ message UserInfo {
   // It's considered deprecated and not commonly used anyway
 }
 
-message IPv4Address {
-  oneof format {
-    string text = 1;
-    sint32 num = 2;
-    // TODO add more
-  }
-}
-
-message IPv6Address {
-  oneof format {
-    string text = 1;
-    // TODO add more
-  }
-}
-
 message Authority {
   UserInfo user_info = 1;
   oneof host {
     Domain hostname = 2;
-    IPv4Address ipv4 = 3;
-    IPv6Address ipv6 = 4;
+    IP ip = 3;
   }
   // leave 0 if unspecified
   sint32 port = 5;
