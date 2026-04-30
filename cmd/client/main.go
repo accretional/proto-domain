@@ -60,7 +60,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("stream recv: %v", err)
 		}
-		fmt.Printf("%s %s\n", rec.GetType(), rec.GetText())
+		fmt.Printf("%-5s ttl=%-6d %s\n", rec.GetType(), rec.GetTtlSeconds(), rec.GetText())
 		count++
 	}
 	fmt.Fprintf(os.Stderr, "(%d records for %s)\n", count, *name)

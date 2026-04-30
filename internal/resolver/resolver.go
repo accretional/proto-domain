@@ -1,25 +1,28 @@
 // Package resolver implements the proto-domain Resolver gRPC service
-// against the host's stub resolver via Go's net package.
+// against the dns/ stdlib fork (which exposes per-record TTLs).
 //
 // Behavior:
-//   - Default *net.Resolver, so we follow the same DNS path the host
-//     itself uses (/etc/resolv.conf or the OS analogue).
-//   - For each record type Go's stdlib exposes (A/AAAA via LookupIPAddr,
-//     CNAME, NS, MX, TXT) we issue one lookup per request and stream the
-//     results back as DNSRecords.
+//   - Default *dns.Resolver, so we follow the same DNS path the host
+//     itself uses (/etc/resolv.conf, /etc/hosts) — minus cgo and
+//     Windows. See dns/COVERAGE.md for what's covered.
+//   - For each record type we currently care about (A, AAAA, CNAME,
+//     NS, MX, TXT) we issue one lookup per request and stream the
+//     results back as DNSRecords with `ttl_seconds` populated from
+//     the wire.
 //   - "No records" / NXDOMAIN per type is silently skipped.
-//   - TTLs aren't surfaced by net.Resolver; ttl_seconds stays 0. The
-//     forked dns/ package (work in progress) will replace this and
-//     populate TTLs.
+//   - Long-tail record types (SOA, CAA, SSHFP, …) are tracked in
+//     dns/COVERAGE.md as Layer 3 work.
 package resolver
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 
+	"golang.org/x/net/dns/dnsmessage"
+
+	"github.com/accretional/proto-domain/dns"
 	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
 
@@ -27,9 +30,9 @@ import (
 type Service struct {
 	domainpb.UnimplementedResolverServer
 
-	// resolver is the underlying net.Resolver. nil means use the
-	// default stdlib resolver (host resolver).
-	resolver *net.Resolver
+	// resolver is the underlying dns.Resolver. nil falls back to
+	// dns.DefaultResolver, which uses the host's /etc/resolv.conf.
+	resolver *dns.Resolver
 }
 
 // New returns a Service backed by the host resolver.
@@ -57,40 +60,44 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 	}
 	r := s.resolver
 	if r == nil {
-		r = net.DefaultResolver
+		r = dns.DefaultResolver
 	}
 
-	emit := func(t domainpb.DNSRecordType, text string) error {
+	emit := func(t domainpb.DNSRecordType, ttl uint32, text string) error {
 		return out.Send(&domainpb.DNSRecord{
-			Type:   t,
-			Target: req,
-			Class:  domainpb.Class_Internet,
-			Format: &domainpb.DNSRecord_Text{Text: text},
+			Type:       t,
+			Target:     req,
+			Class:      domainpb.Class_Internet,
+			TtlSeconds: int32(ttl),
+			Format:     &domainpb.DNSRecord_Text{Text: text},
 		})
 	}
 
-	// A / AAAA via LookupIPAddr.
-	if ips, err := r.LookupIPAddr(ctx, name); err == nil {
-		for _, ip := range ips {
-			t := domainpb.DNSRecordType_AAAA
-			if v4 := ip.IP.To4(); v4 != nil {
-				t = domainpb.DNSRecordType_A
-			}
-			text := ip.IP.String()
-			if ip.Zone != "" {
-				text = text + "%" + ip.Zone
-			}
-			if err := emit(t, text); err != nil {
-				return err
+	// A + AAAA via the typed IP lookup. dns.Resolver.LookupIP returns
+	// []dns.Record (mix of *ARecord / *AAAARecord), each carrying its
+	// own TTL.
+	if recs, err := r.LookupIP(ctx, name); err == nil {
+		for _, rec := range recs {
+			switch v := rec.(type) {
+			case *dns.ARecord:
+				if err := emit(domainpb.DNSRecordType_A, v.TTL, v.IP.String()); err != nil {
+					return err
+				}
+			case *dns.AAAARecord:
+				if err := emit(domainpb.DNSRecordType_AAAA, v.TTL, v.IP.String()); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
-	// CNAME. Stdlib returns the queried name when no CNAME exists; skip
-	// that uninformative case.
-	if cname, err := r.LookupCNAME(ctx, name); err == nil {
+	// CNAME.
+	if cname, err := r.LookupCNAME(ctx, name); err == nil && cname != "" {
 		if !strings.EqualFold(strings.TrimSuffix(cname, "."), strings.TrimSuffix(name, ".")) {
-			if err := emit(domainpb.DNSRecordType_CNAME, cname); err != nil {
+			// dns.Resolver.LookupCNAME returns just the canonical name;
+			// for TTL we have to reach for LookupRecords. Cheap.
+			ttl := lookupCNAMETTL(ctx, r, name)
+			if err := emit(domainpb.DNSRecordType_CNAME, ttl, cname); err != nil {
 				return err
 			}
 		}
@@ -98,7 +105,7 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if nss, err := r.LookupNS(ctx, name); err == nil {
 		for _, ns := range nss {
-			if err := emit(domainpb.DNSRecordType_NS, ns.Host); err != nil {
+			if err := emit(domainpb.DNSRecordType_NS, ns.TTL, ns.Host); err != nil {
 				return err
 			}
 		}
@@ -106,7 +113,7 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if mxs, err := r.LookupMX(ctx, name); err == nil {
 		for _, mx := range mxs {
-			if err := emit(domainpb.DNSRecordType_MX, fmt.Sprintf("%d %s", mx.Pref, mx.Host)); err != nil {
+			if err := emit(domainpb.DNSRecordType_MX, mx.TTL, fmt.Sprintf("%d %s", mx.Pref, mx.Host)); err != nil {
 				return err
 			}
 		}
@@ -114,13 +121,28 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if txts, err := r.LookupTXT(ctx, name); err == nil {
 		for _, txt := range txts {
-			if err := emit(domainpb.DNSRecordType_TXT, txt); err != nil {
+			// Concatenate fragments per stdlib's TXT semantics; any
+			// caller wanting the raw fragments can hit dns/ directly.
+			joined := strings.Join(txt.Strings, "")
+			if err := emit(domainpb.DNSRecordType_TXT, txt.TTL, joined); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// lookupCNAMETTL fetches the TTL for the CNAME chain head. Used only
+// when LookupCNAME succeeded — we already know there's a record.
+// Returns 0 if the secondary lookup fails (the CNAME emit still goes
+// out with whatever TTL we have).
+func lookupCNAMETTL(ctx context.Context, r *dns.Resolver, name string) uint32 {
+	recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeCNAME)
+	if err != nil || len(recs) == 0 {
+		return 0
+	}
+	return recs[0].Hdr().TTL
 }
 
 // canonicalName recovers the queryable string from a Domain message.

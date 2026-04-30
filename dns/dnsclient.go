@@ -9,10 +9,8 @@
 package dns
 
 import (
-	"cmp"
 	"math/rand/v2"
 	"net"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -164,80 +162,9 @@ func absDomainName(s string) string {
 	return s
 }
 
-// An SRV represents a single DNS SRV record.
-type SRV struct {
-	Target   string
-	Port     uint16
-	Priority uint16
-	Weight   uint16
-}
-
-// byPriorityWeight sorts SRV records by ascending priority and weight.
-type byPriorityWeight []*SRV
-
-// shuffleByWeight shuffles SRV records by weight using the algorithm
-// described in RFC 2782.
-func (addrs byPriorityWeight) shuffleByWeight() {
-	sum := 0
-	for _, addr := range addrs {
-		sum += int(addr.Weight)
-	}
-	for sum > 0 && len(addrs) > 1 {
-		s := 0
-		n := randIntn(sum)
-		for i := range addrs {
-			s += int(addrs[i].Weight)
-			if s > n {
-				if i > 0 {
-					addrs[0], addrs[i] = addrs[i], addrs[0]
-				}
-				break
-			}
-		}
-		sum -= int(addrs[0].Weight)
-		addrs = addrs[1:]
-	}
-}
-
-// sort reorders SRV records as specified in RFC 2782.
-func (addrs byPriorityWeight) sort() {
-	slices.SortFunc(addrs, func(a, b *SRV) int {
-		if r := cmp.Compare(a.Priority, b.Priority); r != 0 {
-			return r
-		}
-		return cmp.Compare(a.Weight, b.Weight)
-	})
-	i := 0
-	for j := 1; j < len(addrs); j++ {
-		if addrs[i].Priority != addrs[j].Priority {
-			addrs[i:j].shuffleByWeight()
-			i = j
-		}
-	}
-	addrs[i:].shuffleByWeight()
-}
-
-// An MX represents a single DNS MX record.
-type MX struct {
-	Host string
-	Pref uint16
-}
-
-// byPref sorts MX records by preference
-type byPref []*MX
-
-// sort reorders MX records as specified in RFC 5321.
-func (s byPref) sort() {
-	for i := range s {
-		j := randIntn(i + 1)
-		s[i], s[j] = s[j], s[i]
-	}
-	slices.SortFunc(s, func(a, b *MX) int {
-		return cmp.Compare(a.Pref, b.Pref)
-	})
-}
-
-// An NS represents a single DNS NS record.
-type NS struct {
-	Host string
-}
+// fork: upstream's dnsclient.go also defines bare-typed SRV / MX / NS
+// structs and byPriorityWeight / byPref sort helpers. Layer 2 returns
+// TTL-aware *SRVRecord / *MXRecord / *NSRecord values from records.go
+// directly, with sorting in sort.go, so these upstream types are
+// unused. Dropped to avoid two parallel record vocabularies in our
+// public API.

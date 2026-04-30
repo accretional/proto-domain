@@ -2,6 +2,66 @@
 
 Reverse-chronological. Newest entries on top.
 
+## 2026-04-29 (evening — Layer 2 done, TTLs flowing)
+
+**Layer 2 complete + wired in.** `internal/resolver/` now uses
+`dns.Resolver` instead of `net.Resolver`; `DNSRecord.ttl_seconds` is
+populated from the wire. LET_IT_RIP shows real TTLs for
+accretional.com (A/AAAA=300, NS=83301, MX=231, TXT=300).
+
+**New files**:
+- `dns/records.go` (114 lines) — `Header`, `Record` interface, typed
+  records (`ARecord`, `AAAARecord`, `CNAMERecord`, `NSRecord`,
+  `MXRecord`, `TXTRecord`, `SRVRecord`, `PTRRecord`).
+- `dns/golookup.go` (399 lines) — TTL-preserving `goLookupX`
+  implementations adapted from upstream's bottom-of-`dnsclient_unix.go`.
+  Sequential A+AAAA (vs upstream's parallel fanout — simpler, no
+  package-level WaitGroup); always FilesDNS order for /etc/hosts
+  precedence; no `hostLookupOrder` enum.
+- `dns/lookup.go` (210 lines) — public `Resolver.LookupX` methods +
+  generic `LookupRecords(ctx, name, qtype) []Record` for record
+  types not yet typed. Drops upstream's `LookupPort` (not DNS) and
+  `LookupHost`/`LookupIP`/`LookupNetIP` wrappers (callers can read
+  IP off `*ARecord` / `*AAAARecord` directly).
+- `dns/sort.go` (68 lines) — RFC 5321 / RFC 2782 sort helpers retyped
+  to operate on `*MXRecord` / `*SRVRecord` instead of upstream's bare
+  `*MX` / `*SRV`.
+- `dns/lookup_test.go` (71 lines) — `TestLookupLocalhost` (hosts file
+  smoke), `TestLookupAccretional` (live wire smoke + TTL > 0 check).
+
+**Dropped** from `dns/dnsclient.go`: upstream-shaped `MX` / `NS` / `SRV`
+struct types and their `byPref` / `byPriorityWeight` sort wrappers.
+Layer 2 returns `*MXRecord` / `*NSRecord` / `*SRVRecord` everywhere
+with sorting in `sort.go`, so the bare types were unused. Drop is
+documented in `dnsclient.go` as a `// fork:` block.
+
+**dns/ totals**: 2150 lines across 11 files (1979 source + 71 test +
+~100 doc). Up from 1361 in the Layer-1-only state.
+
+**LET_IT_RIP**: ✓ green. Both localhost and accretional.com paths
+flow through `dns/`, TTLs appear in client output:
+
+```
+A     ttl=300    172.67.132.2
+AAAA  ttl=300    2606:4700:3031::6815:46d
+NS    ttl=83301  liberty.ns.cloudflare.com.
+MX    ttl=231    1 smtp.google.com.
+TXT   ttl=300    v=spf1 include:_spf.google.com ~all
+```
+
+**Next checkpoint** (Task #18): long-tail record types (SOA, CAA,
+SSHFP, TLSA, NAPTR, SVCB/HTTPS, URI, LOC, HINFO, …). Pattern is the
+same per type — define typed body in `records.go`, parse from
+`dnsmessage.UnknownResource` (or the typed `XResource` if dnsmessage
+supports it), add a switch case in `parseGenericAnswers`. Estimated
+~500 lines.
+
+After that, Task #19: direct-to-server queries, iterative resolution,
+AXFR/IXFR, EDNS0 options, DoT/DoH, mDNS. Each is independently
+landable.
+
+DNSSEC (Task #20) deferred per user direction.
+
 ## 2026-04-29 (afternoon — pre-Layer-2 checkpoint)
 
 **Decision**: commit to forking the stdlib `net` DNS path into `dns/`
