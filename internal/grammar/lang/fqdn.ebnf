@@ -1,0 +1,18 @@
+(* Fully-qualified domain name: a domain with a mandatory trailing dot
+   (RFC 1034 absolute form). Same shape as /lang/domain.ebnf except the
+   trailing dot is required.
+
+   Letter / digit ranges, not single-quoted alternations — see the
+   note in /lang/domain.ebnf about the keyword boundary check. *)
+
+fqdn = label , { "." , label } , "." ;
+
+label = let_dig , { let_dig_hyp } ;
+
+let_dig = letter | digit ;
+
+let_dig_hyp = letter | digit | "-" ;
+
+letter = "a" ... "z" | "A" ... "Z" ;
+
+digit = "0" ... "9" ;

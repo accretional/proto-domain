@@ -1,0 +1,37 @@
+(* Domain name in canonical text form, RFC 1035 + RFC 1123 + RFC 5890.
+
+   Accepts a dot-separated sequence of LDH labels with an optional
+   trailing dot marking an absolute (fully qualified) domain name.
+
+   Numeric size constraints — per-label length 1..63 octets and total
+   length <= 253 octets — are enforced by Validate() in Go after a
+   successful parse, NOT by the grammar.
+
+   Per-label rules:
+     - First character: letter or digit (RFC 1123 relaxed RFC 1035's
+       letter-only requirement).
+     - Inner characters: letter, digit, or hyphen.
+     - The grammar permits a label to end in a hyphen; Validate()
+       rejects that case to match RFC 1035's preferred name syntax.
+
+   Lowercase rule names mark these productions as lexical, so the
+   grammar engine does not silently skip whitespace between tokens.
+
+   IMPORTANT: letter and digit are encoded as character ranges, not as
+   alternations of individual quoted characters. gluon's parser applies
+   a "keyword boundary" check to alphabetic terminal literals — it
+   refuses to match an alphabetic terminal that is immediately followed
+   by another letter or digit (so "a" before "b" silently fails to
+   match). Ranges sidestep that check entirely. *)
+
+domain = label , { "." , label } , [ "." ] ;
+
+label = let_dig , { let_dig_hyp } ;
+
+let_dig = letter | digit ;
+
+let_dig_hyp = letter | digit | "-" ;
+
+letter = "a" ... "z" | "A" ... "Z" ;
+
+digit = "0" ... "9" ;

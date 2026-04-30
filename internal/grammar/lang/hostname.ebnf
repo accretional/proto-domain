@@ -1,0 +1,18 @@
+(* Single hostname label (one node in a domain). Same LDH rules as
+   /lang/domain.ebnf's `label` production but standalone — used to
+   parse a single label without any dots.
+
+   Length cap (1..63) and "doesn't end in hyphen" are enforced by
+   Validate() in Go. Letter / digit ranges keep gluon's keyword
+   boundary check (applied to alphabetic terminal literals only) from
+   rejecting multi-letter inputs — see /lang/domain.ebnf's note. *)
+
+hostname = let_dig , { let_dig_hyp } ;
+
+let_dig = letter | digit ;
+
+let_dig_hyp = letter | digit | "-" ;
+
+letter = "a" ... "z" | "A" ... "Z" ;
+
+digit = "0" ... "9" ;

@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package domain;
+
+option go_package = "github.com/accretional/proto-domain/proto/domainpb;domainpb";
+
+import "proto/domainpb/domain.proto";
+import "proto/domainpb/dns_record.proto";
+
+// Resolver answers DNS queries against the host's resolver configuration.
+service Resolver {
+  // GetDNSRecords streams every DNSRecord the local resolver returns for
+  // the supplied Domain. Record types that yield zero results are omitted
+  // from the stream rather than emitting an empty placeholder.
+  rpc GetDNSRecords(Domain) returns (stream DNSRecord);
+}

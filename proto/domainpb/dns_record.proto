@@ -2,10 +2,12 @@ syntax = "proto3";
 
 package domain;
 
-option go_package = "github.com/accretional/proto-domain/pb";
+option go_package = "github.com/accretional/proto-domain/proto/domainpb;domainpb";
+
+import "proto/domainpb/domain.proto";
 
 enum DNSRecordType {
-  Unknown = 0;
+  RECORD_UNKNOWN = 0;
   // Type id 1, RFC 1035. Address record. Returns a 32-bit IPv4 address; most
   // commonly used to map hostnames to an IP address, but also used for DNSBLs,
   // storing subnet masks, etc.
@@ -241,7 +243,7 @@ enum DNSRecordType {
 
 enum Class {
   // Just interpret this as Internet for now. This enum only exists so that we stay in sync with the actual DNS spec / in case we need it later
-  Unknown = 0;
+  CLASS_UNKNOWN = 0;
   Internet = 1;
   // others are defined but seem mostly esoteric, can add if needed. May be useful to use this ourselves at some point though...
 }

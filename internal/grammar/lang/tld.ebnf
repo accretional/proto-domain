@@ -1,0 +1,18 @@
+(* Top-level domain label.
+
+   Stricter than the generic `label` production: an ICANN-recognised
+   TLD must start with a letter (RFC 3696 §2). It may otherwise contain
+   letters, digits, and hyphens (the IDN "xn--…" prefix uses both).
+   Two-character minimum is conventional for non-test TLDs but is not
+   enforced syntactically — Validate() does numeric length checks.
+
+   Letter / digit ranges, not single-quoted alternations — see the
+   note in /lang/domain.ebnf about the keyword boundary check. *)
+
+tld = letter , { let_dig_hyp } ;
+
+let_dig_hyp = letter | digit | "-" ;
+
+letter = "a" ... "z" | "A" ... "Z" ;
+
+digit = "0" ... "9" ;

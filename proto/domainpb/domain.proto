@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package domain;
+
+option go_package = "github.com/accretional/proto-domain/proto/domainpb;domainpb";
+
+// InternetTLD enumerates well-known top-level domains. Only entries that
+// have explicit support here get a stable ID; everything else is carried
+// as a string in the surrounding TLD.custom field.
+enum InternetTLD {
+  None = 0;
+  COM = 1;
+  // TODO bring em all in
+}
+
+// TLD is the rightmost label in a domain name. Either matched against the
+// known InternetTLD enum or carried verbatim as a string.
+message TLD {
+  oneof format {
+    InternetTLD internet = 1;
+    string custom = 2;
+  }
+}
+
+// Domain is a DNS domain name in canonical (RFC 1035 / RFC 5890) form.
+//
+// `hostname` is the original printed string (lowercased, dot-separated,
+// no trailing dot unless the source was an FQDN).
+//
+// `labels` carries the per-label decomposition in left-to-right order
+// EXCLUDING the rightmost (TLD) label — that one rides in `tld`.
+//
+// Round-trip rule: printing the typed Domain back to a string yields
+// `strings.Join(append(labels, tldString(tld)), ".")` plus an optional
+// trailing "." when the original source was a fully qualified domain
+// name (see `fully_qualified`).
+message Domain {
+  string hostname = 1;
+  repeated string labels = 2;
+  TLD tld = 3;
+  // True when the printed source ended with "." (RFC 1034 absolute form).
+  bool fully_qualified = 4;
+}

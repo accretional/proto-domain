@@ -1,23 +1,25 @@
 syntax = "proto3";
 
-package resource;
+package domain;
 
-option go_package = "github.com/accretional/proto-resource/pb";
-import "accretional/proto-ip/ip.proto";
+option go_package = "github.com/accretional/proto-domain/proto/domainpb;domainpb";
+
+import "proto/domainpb/domain.proto";
+import "proto/ippb/ip.proto";
 
 // helpful: https://en.wikipedia.org/wiki/List_of_URI_schemes
 enum URIScheme {
-  UNKNOWN = 0;
-  HTTP = 1;
-  HTTPS = 2;
-  FILE = 3;
-  FTP = 4;
-  MAILTO = 5;
-  TEL = 6;
-  IMAP = 7;
-  IRC = 8;
-  WS = 9;
-  WSS = 10;
+  SCHEME_UNKNOWN = 0;
+  SCHEME_HTTP = 1;
+  SCHEME_HTTPS = 2;
+  SCHEME_FILE = 3;
+  SCHEME_FTP = 4;
+  SCHEME_MAILTO = 5;
+  SCHEME_TEL = 6;
+  SCHEME_IMAP = 7;
+  SCHEME_IRC = 8;
+  SCHEME_WS = 9;
+  SCHEME_WSS = 10;
   // Keep these protocol-level and non-proprietary
 }
 
@@ -28,18 +30,19 @@ message Scheme {
   }
 }
 
-
 message UserInfo {
   string username = 1;
-  // Not implementing "password"/credentials yet, maybe never, too much risk that someone will think they need to use it and end up dealing in cleartext passwords accidentally
-  // It's considered deprecated and not commonly used anyway
+  // Not implementing "password"/credentials yet, maybe never, too much
+  // risk that someone will think they need to use it and end up dealing
+  // in cleartext passwords accidentally. It's considered deprecated and
+  // not commonly used anyway.
 }
 
 message Authority {
   UserInfo user_info = 1;
   oneof host {
     Domain hostname = 2;
-    IP ip = 3;
+    ip.IP ip = 3;
   }
   // leave 0 if unspecified
   sint32 port = 5;
