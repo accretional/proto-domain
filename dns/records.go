@@ -11,6 +11,7 @@ package dns
 
 import (
 	"net"
+	"strings"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -112,3 +113,29 @@ type PTRRecord struct {
 }
 
 func (r *PTRRecord) Hdr() *Header { return &r.Header }
+
+// SOARecord represents a SOA (Start of Authority) RR per RFC 1035.
+type SOARecord struct {
+	Header
+	NS      string // primary name server in presentation form
+	MBox    string // responsible mailbox in DNS name form (e.g. "hostmaster.example.com.")
+	Serial  uint32
+	Refresh uint32
+	Retry   uint32
+	Expire  uint32
+	MinTTL  uint32
+}
+
+func (r *SOARecord) Hdr() *Header { return &r.Header }
+
+// MBoxToEmail converts a DNS SOA RNAME to an email address. Per RFC 1035 §8,
+// the first label is the local-part and remaining labels (minus trailing dot)
+// form the domain: "hostmaster.example.com." → "hostmaster@example.com".
+func MBoxToEmail(mbox string) string {
+	mbox = strings.TrimSuffix(mbox, ".")
+	idx := strings.IndexByte(mbox, '.')
+	if idx < 0 {
+		return mbox
+	}
+	return mbox[:idx] + "@" + mbox[idx+1:]
+}

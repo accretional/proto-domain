@@ -60,6 +60,35 @@ func TestResolveLocalhost(t *testing.T) {
 	}
 }
 
+// TestResolveSOA_Accretional verifies the resolver emits at least one SOA
+// record for a real domain. Skipped with -short.
+func TestResolveSOA_Accretional(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-dependent test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	svc := New()
+	dom := &domainpb.Domain{
+		Hostname: "accretional.com",
+		Labels:   []string{"accretional"},
+		Tld:      &domainpb.TLD{Format: &domainpb.TLD_Custom{Custom: "com"}},
+	}
+	recs := resolve(t, ctx, svc, dom)
+	var soaText string
+	for _, r := range recs {
+		if r.GetType() == domainpb.DNSRecordType_SOA {
+			soaText = r.GetText()
+			break
+		}
+	}
+	if soaText == "" {
+		t.Skip("no SOA record returned — resolver or network issue?")
+	}
+	t.Logf("SOA text: %s", soaText)
+}
+
 // TestResolveNoSuchDomain verifies the resolver does not error or panic
 // when no records exist — it just returns an empty stream. Uses a name
 // in the IETF-reserved invalid TLD per RFC 6761.

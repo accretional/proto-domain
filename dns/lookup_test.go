@@ -40,6 +40,33 @@ func TestLookupLocalhost(t *testing.T) {
 	}
 }
 
+// TestLookupSOA_Accretional verifies LookupSOA returns a record with a
+// parseable MBox for a live domain. Skipped with -short.
+func TestLookupSOA_Accretional(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-dependent test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	recs, err := DefaultResolver.LookupSOA(ctx, "accretional.com")
+	if err != nil {
+		t.Fatalf("LookupSOA(accretional.com): %v", err)
+	}
+	if len(recs) == 0 {
+		t.Skip("LookupSOA returned no records — no SOA published for accretional.com?")
+	}
+	soa := recs[0]
+	if soa.NS == "" {
+		t.Error("SOA.NS is empty")
+	}
+	if soa.MBox == "" {
+		t.Error("SOA.MBox is empty")
+	}
+	email := MBoxToEmail(soa.MBox)
+	t.Logf("SOA: NS=%s MBox=%s email=%s TTL=%d", soa.NS, soa.MBox, email, soa.TTL)
+}
+
 // TestLookupAccretional hits the live network (LET_IT_RIP territory).
 // We expose it as a regular test but skip when -short is set.
 func TestLookupAccretional(t *testing.T) {

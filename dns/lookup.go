@@ -115,6 +115,21 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
 			out = append(out, &PTRRecord{Header: hdr, Target: body.PTR.String()})
+		case dnsmessage.TypeSOA:
+			body, err := p.SOAResource()
+			if err != nil {
+				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
+			}
+			out = append(out, &SOARecord{
+				Header:  hdr,
+				NS:      body.NS.String(),
+				MBox:    body.MBox.String(),
+				Serial:  body.Serial,
+				Refresh: body.Refresh,
+				Retry:   body.Retry,
+				Expire:  body.Expire,
+				MinTTL:  body.MinTTL,
+			})
 		default:
 			// Unknown type for our typed records. Skip — long-tail
 			// record types will plug in here once Layer 3 lands.
@@ -207,4 +222,20 @@ func (r *Resolver) LookupSRV(ctx context.Context, service, proto, name string) (
 // or ip6.arpa name on the system resolver.
 func (r *Resolver) LookupPTR(ctx context.Context, addr string) ([]*PTRRecord, error) {
 	return r.goLookupPTR(ctx, addr, nil)
+}
+
+// LookupSOA returns SOA records for name with TTLs preserved. Most zones
+// have exactly one SOA; the slice form mirrors the other Lookup* methods.
+func (r *Resolver) LookupSOA(ctx context.Context, name string) ([]*SOARecord, error) {
+	recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeSOA)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*SOARecord, 0, len(recs))
+	for _, rec := range recs {
+		if soa, ok := rec.(*SOARecord); ok {
+			out = append(out, soa)
+		}
+	}
+	return out, nil
 }

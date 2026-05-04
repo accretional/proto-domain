@@ -130,6 +130,18 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		}
 	}
 
+	// SOA — zone file presentation: "<ns> <mbox> <serial> <refresh> <retry> <expire> <minttl>"
+	if soas, err := r.LookupSOA(ctx, name); err == nil {
+		for _, soa := range soas {
+			text := fmt.Sprintf("%s %s %d %d %d %d %d",
+				soa.NS, soa.MBox,
+				soa.Serial, soa.Refresh, soa.Retry, soa.Expire, soa.MinTTL)
+			if err := emit(domainpb.DNSRecordType_SOA, soa.TTL, text); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
