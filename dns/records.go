@@ -128,6 +128,133 @@ type SOARecord struct {
 
 func (r *SOARecord) Hdr() *Header { return &r.Header }
 
+// HINFORecord represents an HINFO (host information) RR per RFC 1035 §3.3.2.
+type HINFORecord struct {
+	Header
+	CPU string
+	OS  string
+}
+
+func (r *HINFORecord) Hdr() *Header { return &r.Header }
+
+// RPRecord represents an RP (responsible person) RR per RFC 1183.
+// Mbox is a domain name encoding the mailbox (same format as SOA RNAME).
+// Txt is a domain name of a TXT record with additional information.
+type RPRecord struct {
+	Header
+	Mbox string
+	Txt  string
+}
+
+func (r *RPRecord) Hdr() *Header { return &r.Header }
+
+// AFSDBRecord represents an AFSDB RR per RFC 1183. Subtype 1 = AFS
+// cell database server; subtype 2 = DCE/NCA root cell directory node.
+type AFSDBRecord struct {
+	Header
+	Subtype  uint16
+	Hostname string
+}
+
+func (r *AFSDBRecord) Hdr() *Header { return &r.Header }
+
+// NAPTRRecord represents a NAPTR (naming authority pointer) RR per RFC 3403.
+type NAPTRRecord struct {
+	Header
+	Order       uint16
+	Preference  uint16
+	Flags       string
+	Service     string
+	Regexp      string
+	Replacement string // domain name in presentation form
+}
+
+func (r *NAPTRRecord) Hdr() *Header { return &r.Header }
+
+// KXRecord represents a KX (key exchange) RR per RFC 2230.
+type KXRecord struct {
+	Header
+	Preference uint16
+	Exchanger  string
+}
+
+func (r *KXRecord) Hdr() *Header { return &r.Header }
+
+// SSHFPRecord represents an SSHFP (SSH fingerprint) RR per RFC 4255.
+// Algorithm: 1=RSA, 2=DSA, 3=ECDSA, 4=Ed25519. FpType: 1=SHA-1, 2=SHA-256.
+type SSHFPRecord struct {
+	Header
+	Algorithm   uint8
+	FpType      uint8
+	Fingerprint []byte
+}
+
+func (r *SSHFPRecord) Hdr() *Header { return &r.Header }
+
+// TLSARecord represents a TLSA (TLS authentication) RR per RFC 6698 (DANE).
+// Usage, Selector, and MatchingType encode how CertAssocData should be
+// interpreted; see RFC 6698 §2.1 for values.
+type TLSARecord struct {
+	Header
+	Usage         uint8
+	Selector      uint8
+	MatchingType  uint8
+	CertAssocData []byte
+}
+
+func (r *TLSARecord) Hdr() *Header { return &r.Header }
+
+// SVCBParam is a single SVCB/HTTPS service parameter key-value pair.
+type SVCBParam struct {
+	Key   uint16
+	Value []byte
+}
+
+// SVCBRecord represents an SVCB RR per RFC 9460. Priority 0 means AliasMode
+// (TargetName is an alias); any other value is ServiceMode.
+type SVCBRecord struct {
+	Header
+	Priority   uint16
+	TargetName string // "." means the SVCB owner name itself
+	Params     []SVCBParam
+}
+
+func (r *SVCBRecord) Hdr() *Header { return &r.Header }
+
+// HTTPSRecord represents an HTTPS RR per RFC 9460. It has the same wire
+// format as SVCB but is a distinct RR type (65 vs 64).
+type HTTPSRecord struct {
+	Header
+	Priority   uint16
+	TargetName string
+	Params     []SVCBParam
+}
+
+func (r *HTTPSRecord) Hdr() *Header { return &r.Header }
+
+// CAARecord represents a CAA (certification authority authorization) RR
+// per RFC 8659. Tag is typically "issue", "issuewild", or "iodef".
+// Flags bit 7 (0x01) is the issuer critical flag.
+type CAARecord struct {
+	Header
+	Flags uint8
+	Tag   string
+	Value string
+}
+
+func (r *CAARecord) Hdr() *Header { return &r.Header }
+
+// URIRecord represents a URI (RFC 7553) RR. The Target is the full URI string
+// (e.g. "mailto:admin@example.com" or "tel:+15551234567").
+type URIRecord struct {
+	Header
+	Priority uint16
+	Weight   uint16
+	Target   string
+}
+
+func (r *URIRecord) Hdr() *Header { return &r.Header }
+
 // MBoxToEmail converts a DNS SOA RNAME to an email address. Per RFC 1035 §8,
 // the first label is the local-part and remaining labels (minus trailing dot)
 // form the domain: "hostmaster.example.com." → "hostmaster@example.com".
