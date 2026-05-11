@@ -16,6 +16,7 @@ package resolver
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -142,7 +143,111 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		}
 	}
 
+	// HINFO — "<cpu> <os>"
+	if recs, err := r.LookupHINFO(ctx, name); err == nil {
+		for _, h := range recs {
+			if err := emit(domainpb.DNSRecordType_HINFO, h.TTL, fmt.Sprintf("%q %q", h.CPU, h.OS)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// RP — "<mbox> <txt>"
+	if recs, err := r.LookupRP(ctx, name); err == nil {
+		for _, rp := range recs {
+			if err := emit(domainpb.DNSRecordType_RP, rp.TTL, rp.Mbox+" "+rp.Txt); err != nil {
+				return err
+			}
+		}
+	}
+
+	// AFSDB — "<subtype> <hostname>"
+	if recs, err := r.LookupAFSDB(ctx, name); err == nil {
+		for _, a := range recs {
+			if err := emit(domainpb.DNSRecordType_AFSDB, a.TTL, fmt.Sprintf("%d %s", a.Subtype, a.Hostname)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// NAPTR — RFC 3403 presentation: <order> <pref> "<flags>" "<service>" "<regexp>" <replacement>
+	if recs, err := r.LookupNAPTR(ctx, name); err == nil {
+		for _, n := range recs {
+			text := fmt.Sprintf(`%d %d %q %q %q %s`, n.Order, n.Preference, n.Flags, n.Service, n.Regexp, n.Replacement)
+			if err := emit(domainpb.DNSRecordType_NAPTR, n.TTL, text); err != nil {
+				return err
+			}
+		}
+	}
+
+	// KX — "<preference> <exchanger>"
+	if recs, err := r.LookupKX(ctx, name); err == nil {
+		for _, kx := range recs {
+			if err := emit(domainpb.DNSRecordType_KX, kx.TTL, fmt.Sprintf("%d %s", kx.Preference, kx.Exchanger)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// SSHFP — RFC 4255 presentation: <algorithm> <fptype> <hex-fingerprint>
+	if recs, err := r.LookupSSHFP(ctx, name); err == nil {
+		for _, s := range recs {
+			text := fmt.Sprintf("%d %d %s", s.Algorithm, s.FpType, hex.EncodeToString(s.Fingerprint))
+			if err := emit(domainpb.DNSRecordType_SSHFP, s.TTL, text); err != nil {
+				return err
+			}
+		}
+	}
+
+	// SVCB — "<priority> <target> [key=hexval ...]"
+	if recs, err := r.LookupSVCB(ctx, name); err == nil {
+		for _, s := range recs {
+			if err := emit(domainpb.DNSRecordType_SVCB, s.TTL, svcbText(s.Priority, s.TargetName, s.Params)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// HTTPS — same presentation as SVCB, distinct type
+	if recs, err := r.LookupHTTPS(ctx, name); err == nil {
+		for _, h := range recs {
+			if err := emit(domainpb.DNSRecordType_HTTPS, h.TTL, svcbText(h.Priority, h.TargetName, h.Params)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// CAA — RFC 8659 presentation: <flags> <tag> "<value>"
+	if recs, err := r.LookupCAA(ctx, name); err == nil {
+		for _, c := range recs {
+			if err := emit(domainpb.DNSRecordType_CAA, c.TTL, fmt.Sprintf("%d %s %q", c.Flags, c.Tag, c.Value)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// URI — RFC 7553 presentation: <priority> <weight> "<target>"
+	if recs, err := r.LookupURI(ctx, name); err == nil {
+		for _, u := range recs {
+			if err := emit(domainpb.DNSRecordType_URI, u.TTL, fmt.Sprintf("%d %d %q", u.Priority, u.Weight, u.Target)); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
+}
+
+// svcbText formats SVCB/HTTPS record text. Params are rendered as
+// key=hexval pairs; callers that need parsed param values should use
+// dns.LookupSVCB / dns.LookupHTTPS directly.
+func svcbText(priority uint16, target string, params []dns.SVCBParam) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d %s", priority, target)
+	for _, p := range params {
+		fmt.Fprintf(&b, " %d=%s", p.Key, hex.EncodeToString(p.Value))
+	}
+	return b.String()
 }
 
 // lookupCNAMETTL fetches the TTL for the CNAME chain head. Used only
