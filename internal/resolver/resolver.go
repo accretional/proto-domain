@@ -5,13 +5,15 @@
 //   - Default *dns.Resolver, so we follow the same DNS path the host
 //     itself uses (/etc/resolv.conf, /etc/hosts) — minus cgo and
 //     Windows. See dns/COVERAGE.md for what's covered.
-//   - For each record type we currently care about (A, AAAA, CNAME,
-//     NS, MX, TXT) we issue one lookup per request and stream the
-//     results back as DNSRecords with `ttl_seconds` populated from
-//     the wire.
+//   - All queries are issued as fully-qualified names (trailing dot) so
+//     that nameList() skips /etc/resolv.conf search-domain suffix
+//     expansion — which otherwise doubles UDP round-trips for NXDOMAIN.
+//   - Only record types that are commonly populated for internet domains
+//     are queried (A/AAAA, CNAME, NS, MX, TXT, SOA, SSHFP, SVCB,
+//     HTTPS, CAA). Rare/obsolete types (HINFO, RP, AFSDB, NAPTR, KX,
+//     URI) are omitted — they returned no results across a 34K-domain
+//     sample and each one costs a serial DNS round-trip.
 //   - "No records" / NXDOMAIN per type is silently skipped.
-//   - Long-tail record types (SOA, CAA, SSHFP, …) are tracked in
-//     dns/COVERAGE.md as Layer 3 work.
 package resolver
 
 import (
@@ -92,14 +94,18 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		}
 	}
 
-	// CNAME.
-	if cname, err := r.LookupCNAME(ctx, name); err == nil && cname != "" {
-		if !strings.EqualFold(strings.TrimSuffix(cname, "."), strings.TrimSuffix(name, ".")) {
-			// dns.Resolver.LookupCNAME returns just the canonical name;
-			// for TTL we have to reach for LookupRecords. Cheap.
-			ttl := lookupCNAMETTL(ctx, r, name)
-			if err := emit(domainpb.DNSRecordType_CNAME, ttl, cname); err != nil {
-				return err
+	// CNAME — single LookupRecords call gives both target and TTL,
+	// avoiding the original two-call (LookupCNAME + LookupRecords) path.
+	if recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeCNAME); err == nil {
+		for _, rec := range recs {
+			cr, ok := rec.(*dns.CNAMERecord)
+			if !ok {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSuffix(cr.Target, "."), strings.TrimSuffix(name, ".")) {
+				if err := emit(domainpb.DNSRecordType_CNAME, cr.TTL, cr.Target); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -122,8 +128,6 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if txts, err := r.LookupTXT(ctx, name); err == nil {
 		for _, txt := range txts {
-			// Concatenate fragments per stdlib's TXT semantics; any
-			// caller wanting the raw fragments can hit dns/ directly.
 			joined := strings.Join(txt.Strings, "")
 			if err := emit(domainpb.DNSRecordType_TXT, txt.TTL, joined); err != nil {
 				return err
@@ -138,52 +142,6 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 				soa.NS, soa.MBox,
 				soa.Serial, soa.Refresh, soa.Retry, soa.Expire, soa.MinTTL)
 			if err := emit(domainpb.DNSRecordType_SOA, soa.TTL, text); err != nil {
-				return err
-			}
-		}
-	}
-
-	// HINFO — "<cpu> <os>"
-	if recs, err := r.LookupHINFO(ctx, name); err == nil {
-		for _, h := range recs {
-			if err := emit(domainpb.DNSRecordType_HINFO, h.TTL, fmt.Sprintf("%q %q", h.CPU, h.OS)); err != nil {
-				return err
-			}
-		}
-	}
-
-	// RP — "<mbox> <txt>"
-	if recs, err := r.LookupRP(ctx, name); err == nil {
-		for _, rp := range recs {
-			if err := emit(domainpb.DNSRecordType_RP, rp.TTL, rp.Mbox+" "+rp.Txt); err != nil {
-				return err
-			}
-		}
-	}
-
-	// AFSDB — "<subtype> <hostname>"
-	if recs, err := r.LookupAFSDB(ctx, name); err == nil {
-		for _, a := range recs {
-			if err := emit(domainpb.DNSRecordType_AFSDB, a.TTL, fmt.Sprintf("%d %s", a.Subtype, a.Hostname)); err != nil {
-				return err
-			}
-		}
-	}
-
-	// NAPTR — RFC 3403 presentation: <order> <pref> "<flags>" "<service>" "<regexp>" <replacement>
-	if recs, err := r.LookupNAPTR(ctx, name); err == nil {
-		for _, n := range recs {
-			text := fmt.Sprintf(`%d %d %q %q %q %s`, n.Order, n.Preference, n.Flags, n.Service, n.Regexp, n.Replacement)
-			if err := emit(domainpb.DNSRecordType_NAPTR, n.TTL, text); err != nil {
-				return err
-			}
-		}
-	}
-
-	// KX — "<preference> <exchanger>"
-	if recs, err := r.LookupKX(ctx, name); err == nil {
-		for _, kx := range recs {
-			if err := emit(domainpb.DNSRecordType_KX, kx.TTL, fmt.Sprintf("%d %s", kx.Preference, kx.Exchanger)); err != nil {
 				return err
 			}
 		}
@@ -226,15 +184,6 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		}
 	}
 
-	// URI — RFC 7553 presentation: <priority> <weight> "<target>"
-	if recs, err := r.LookupURI(ctx, name); err == nil {
-		for _, u := range recs {
-			if err := emit(domainpb.DNSRecordType_URI, u.TTL, fmt.Sprintf("%d %d %q", u.Priority, u.Weight, u.Target)); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -250,31 +199,27 @@ func svcbText(priority uint16, target string, params []dns.SVCBParam) string {
 	return b.String()
 }
 
-// lookupCNAMETTL fetches the TTL for the CNAME chain head. Used only
-// when LookupCNAME succeeded — we already know there's a record.
-// Returns 0 if the secondary lookup fails (the CNAME emit still goes
-// out with whatever TTL we have).
-func lookupCNAMETTL(ctx context.Context, r *dns.Resolver, name string) uint32 {
-	recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeCNAME)
-	if err != nil || len(recs) == 0 {
-		return 0
-	}
-	return recs[0].Hdr().TTL
-}
-
-// canonicalName recovers the queryable string from a Domain message.
-// Prefers the structured (labels + TLD) representation, falling back
-// to `hostname` for partially-populated messages.
+// canonicalName recovers the queryable string from a Domain message and
+// ensures it is fully-qualified (trailing dot). A rooted name causes
+// nameList() to return a single-entry slice, skipping /etc/resolv.conf
+// search-domain suffix expansion which otherwise doubles UDP round-trips
+// for every NXDOMAIN response.
 func canonicalName(d *domainpb.Domain) string {
 	parts := make([]string, 0, len(d.GetLabels())+1)
 	parts = append(parts, d.GetLabels()...)
 	if t := tldString(d.GetTld()); t != "" {
 		parts = append(parts, t)
 	}
+	var name string
 	if len(parts) == 0 {
-		return strings.TrimSuffix(d.GetHostname(), ".")
+		name = strings.TrimSuffix(d.GetHostname(), ".")
+	} else {
+		name = strings.Join(parts, ".")
 	}
-	return strings.Join(parts, ".")
+	if name == "" {
+		return ""
+	}
+	return name + "."
 }
 
 func tldString(t *domainpb.TLD) string {

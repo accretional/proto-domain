@@ -17,6 +17,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
 )
 
-replace github.com/accretional/gluon => /Volumes/wd_office_1/repos/gluon
+replace github.com/accretional/gluon => ../gluon
 
-replace github.com/accretional/proto-ip => /Volumes/wd_office_1/repos/proto-ip
+replace github.com/accretional/proto-ip => ../proto-ip
