@@ -8,11 +8,10 @@
 //   - All queries are issued as fully-qualified names (trailing dot) so
 //     that nameList() skips /etc/resolv.conf search-domain suffix
 //     expansion — which otherwise doubles UDP round-trips for NXDOMAIN.
-//   - Only record types that are commonly populated for internet domains
-//     are queried (A/AAAA, CNAME, NS, MX, TXT, SOA, SSHFP, SVCB,
-//     HTTPS, CAA). Rare/obsolete types (HINFO, RP, AFSDB, NAPTR, KX,
-//     URI) are omitted — they returned no results across a 34K-domain
-//     sample and each one costs a serial DNS round-trip.
+//   - Queried types: A/AAAA, CNAME, NS, MX, TXT, SOA, SSHFP, SVCB,
+//     HTTPS, CAA, URI. Omitted: HINFO, RP, AFSDB, NAPTR, KX — these
+//     returned no results across a 34K-domain sample and each costs a
+//     serial DNS round-trip.
 //   - "No records" / NXDOMAIN per type is silently skipped.
 package resolver
 
@@ -179,6 +178,15 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 	if recs, err := r.LookupCAA(ctx, name); err == nil {
 		for _, c := range recs {
 			if err := emit(domainpb.DNSRecordType_CAA, c.TTL, fmt.Sprintf("%d %s %q", c.Flags, c.Tag, c.Value)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// URI — RFC 7553 presentation: <priority> <weight> "<target>"
+	if recs, err := r.LookupURI(ctx, name); err == nil {
+		for _, u := range recs {
+			if err := emit(domainpb.DNSRecordType_URI, u.TTL, fmt.Sprintf("%d %d %q", u.Priority, u.Weight, u.Target)); err != nil {
 				return err
 			}
 		}
