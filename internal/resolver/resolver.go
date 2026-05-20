@@ -8,10 +8,16 @@
 //   - All queries are issued as fully-qualified names (trailing dot) so
 //     that nameList() skips /etc/resolv.conf search-domain suffix
 //     expansion — which otherwise doubles UDP round-trips for NXDOMAIN.
-//   - Queried types: A/AAAA, CNAME, DNAME, NS, MX, TXT, SOA, SSHFP,
-//     SVCB, HTTPS, CAA, URI. Omitted: HINFO, RP, AFSDB, NAPTR, KX
-//     (zero hits in a 34K-domain sample, each costs a round-trip);
-//     DNSSEC types (DS, DNSKEY) intentionally excluded.
+//   - Queried types: A/AAAA, CNAME, DNAME, NS, MX, TXT, SOA, LOC,
+//     HINFO, RP, AFSDB, NAPTR, KX, SSHFP, SVCB, HTTPS, CAA, URI.
+//     TLSA omitted (canonical owner is _<port>._<proto>.<host>, not
+//     the apex). DNSSEC types (DS, DNSKEY, RRSIG, NSEC, NSEC3, CDS,
+//     CDNSKEY) intentionally excluded — see proto-domain Task #20.
+//   - Lookups are issued sequentially. Per-domain fanout was tested
+//     (see proto-ct bench_fanout.sh on 2026-05-20) and consistently
+//     lost to sequential — the bottleneck is the upstream resolver,
+//     not our orchestration, and a fast upstream (local unbound)
+//     benefits from sequential cache locality.
 //   - "No records" / NXDOMAIN per type is silently skipped.
 package resolver
 
@@ -159,6 +165,61 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		}
 	}
 
+	// LOC — RFC 1876, converted to "<lat-deg> <lon-deg> <alt-m>m size=<m> hp=<m> vp=<m>"
+	if recs, err := r.LookupLOC(ctx, name); err == nil {
+		for _, l := range recs {
+			if err := emit(domainpb.DNSRecordType_LOC, l.TTL, locText(l)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// HINFO — RFC 1035 §3.3.2: "<cpu>" "<os>"
+	if recs, err := r.LookupHINFO(ctx, name); err == nil {
+		for _, h := range recs {
+			if err := emit(domainpb.DNSRecordType_HINFO, h.TTL, fmt.Sprintf("%q %q", h.CPU, h.OS)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// RP — RFC 1183: <mbox> <txt>
+	if recs, err := r.LookupRP(ctx, name); err == nil {
+		for _, rp := range recs {
+			if err := emit(domainpb.DNSRecordType_RP, rp.TTL, fmt.Sprintf("%s %s", rp.Mbox, rp.Txt)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// AFSDB — RFC 1183: <subtype> <hostname>
+	if recs, err := r.LookupAFSDB(ctx, name); err == nil {
+		for _, a := range recs {
+			if err := emit(domainpb.DNSRecordType_AFSDB, a.TTL, fmt.Sprintf("%d %s", a.Subtype, a.Hostname)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// NAPTR — RFC 3403: <order> <preference> "<flags>" "<service>" "<regexp>" <replacement>
+	if recs, err := r.LookupNAPTR(ctx, name); err == nil {
+		for _, n := range recs {
+			text := fmt.Sprintf("%d %d %q %q %q %s", n.Order, n.Preference, n.Flags, n.Service, n.Regexp, n.Replacement)
+			if err := emit(domainpb.DNSRecordType_NAPTR, n.TTL, text); err != nil {
+				return err
+			}
+		}
+	}
+
+	// KX — RFC 2230: <preference> <exchanger>
+	if recs, err := r.LookupKX(ctx, name); err == nil {
+		for _, kx := range recs {
+			if err := emit(domainpb.DNSRecordType_KX, kx.TTL, fmt.Sprintf("%d %s", kx.Preference, kx.Exchanger)); err != nil {
+				return err
+			}
+		}
+	}
+
 	// SSHFP — RFC 4255 presentation: <algorithm> <fptype> <hex-fingerprint>
 	if recs, err := r.LookupSSHFP(ctx, name); err == nil {
 		for _, s := range recs {
@@ -206,6 +267,34 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 	}
 
 	return nil
+}
+
+// locText converts a LOC record (RFC 1876) to a compact, parseable form
+// preserving all wire fields: latitude and longitude as signed decimal
+// degrees, altitude in meters, and the three precision bytes decoded
+// to meters via locPrecision.
+func locText(l *dns.LOCRecord) string {
+	const latLonBias = 1 << 31   // equator / prime meridian
+	const altBiasCm = 10_000_000 // so that 0 == -100 000 m
+	latDeg := float64(int64(l.Latitude)-latLonBias) / 3_600_000.0
+	lonDeg := float64(int64(l.Longitude)-latLonBias) / 3_600_000.0
+	altM := float64(int64(l.Altitude)-altBiasCm) / 100.0
+	return fmt.Sprintf("%.6f %.6f %.2fm size=%s hp=%s vp=%s",
+		latDeg, lonDeg, altM,
+		locPrecision(l.Size), locPrecision(l.HorizPre), locPrecision(l.VertPre))
+}
+
+// locPrecision decodes an RFC 1876 precision byte. High nibble is the
+// mantissa (1–9), low nibble the base-10 exponent in centimeters.
+// Returns the value in meters with "m" suffix.
+func locPrecision(b uint8) string {
+	mant := float64(b >> 4)
+	exp := int(b & 0x0F)
+	cm := mant
+	for i := 0; i < exp; i++ {
+		cm *= 10
+	}
+	return fmt.Sprintf("%.2fm", cm/100.0)
 }
 
 // svcbText formats SVCB/HTTPS record text. Params are rendered as

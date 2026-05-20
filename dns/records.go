@@ -190,6 +190,26 @@ type KXRecord struct {
 
 func (r *KXRecord) Hdr() *Header { return &r.Header }
 
+// LOCRecord represents a LOC (location information) RR per RFC 1876.
+// Latitude, Longitude, and Altitude are stored as the raw biased wire
+// values (lat/lon: milli-arcseconds biased by 2^31, equator/prime
+// meridian = 2^31; altitude: centimeters biased by 10_000_000 so that
+// 0 == -100 000 m). Size, HorizPre, VertPre are the precision bytes:
+// high nibble is the base-10 mantissa (1–9), low nibble the exponent
+// in centimeters. Callers wanting presentation form should convert.
+type LOCRecord struct {
+	Header
+	Version   uint8
+	Size      uint8
+	HorizPre  uint8
+	VertPre   uint8
+	Latitude  uint32
+	Longitude uint32
+	Altitude  uint32
+}
+
+func (r *LOCRecord) Hdr() *Header { return &r.Header }
+
 // SSHFPRecord represents an SSHFP (SSH fingerprint) RR per RFC 4255.
 // Algorithm: 1=RSA, 2=DSA, 3=ECDSA, 4=Ed25519. FpType: 1=SHA-1, 2=SHA-256.
 type SSHFPRecord struct {

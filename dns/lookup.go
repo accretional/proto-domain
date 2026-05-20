@@ -31,9 +31,10 @@ import (
 const (
 	TypeRP    dnsmessage.Type = 17
 	TypeAFSDB dnsmessage.Type = 18
-	TypeDNAME dnsmessage.Type = 39
+	TypeLOC   dnsmessage.Type = 29
 	TypeNAPTR dnsmessage.Type = 35
 	TypeKX    dnsmessage.Type = 36
+	TypeDNAME dnsmessage.Type = 39
 	TypeSSHFP dnsmessage.Type = 44
 	TypeTLSA  dnsmessage.Type = 52
 	TypeSVCB  dnsmessage.Type = 64
@@ -260,6 +261,27 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
 			out = append(out, &AFSDBRecord{Header: hdr, Subtype: subtype, Hostname: host})
+		case TypeLOC:
+			// RFC 1876: version(1), size(1), horiz_pre(1), vert_pre(1),
+			// latitude(4), longitude(4), altitude(4) — total 16 bytes.
+			raw, err := p.UnknownResource()
+			if err != nil || len(raw.Data) < 16 {
+				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
+			}
+			d := raw.Data
+			u32 := func(i int) uint32 {
+				return uint32(d[i])<<24 | uint32(d[i+1])<<16 | uint32(d[i+2])<<8 | uint32(d[i+3])
+			}
+			out = append(out, &LOCRecord{
+				Header:    hdr,
+				Version:   d[0],
+				Size:      d[1],
+				HorizPre:  d[2],
+				VertPre:   d[3],
+				Latitude:  u32(4),
+				Longitude: u32(8),
+				Altitude:  u32(12),
+			})
 		case TypeNAPTR:
 			// RFC 3403: order(2), preference(2), flags(cs), service(cs), regexp(cs), replacement(name).
 			raw, err := p.UnknownResource()
@@ -475,6 +497,21 @@ func (r *Resolver) LookupSOA(ctx context.Context, name string) ([]*SOARecord, er
 	for _, rec := range recs {
 		if soa, ok := rec.(*SOARecord); ok {
 			out = append(out, soa)
+		}
+	}
+	return out, nil
+}
+
+// LookupLOC returns LOC records (RFC 1876) for name.
+func (r *Resolver) LookupLOC(ctx context.Context, name string) ([]*LOCRecord, error) {
+	recs, err := r.LookupRecords(ctx, name, TypeLOC)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*LOCRecord, 0, len(recs))
+	for _, rec := range recs {
+		if l, ok := rec.(*LOCRecord); ok {
+			out = append(out, l)
 		}
 	}
 	return out, nil
