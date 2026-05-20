@@ -2,6 +2,66 @@
 
 Reverse-chronological. Newest entries on top.
 
+## 2026-05-20 (DNAME, LOC + restored long-tail, local-resolver support)
+
+Three changes driven by the proto-ct dnsfetch pipeline going to bulk
+collection.
+
+**DNAME (e2336fb).** Type 39, RFC 6672. Layer 2 fork from upstream
+`net` carried no DNAME (stdlib follows CNAME chains but never surfaces
+DNAME) so `parseGenericAnswers`'s `default: SkipAnswer()` was silently
+dropping every DNAME response. Added `DNAMERecord`, `TypeDNAME = 39`
+constant, wire parser (single compressed name, same format as CNAME
+body, parsed via `UnknownResource` + `parseWireName`), and a
+`Resolver_GetDNSRecords` emit case.
+
+**LOC + 5 restored types (3951a02).** LOC (RFC 1876, type 29) is new
+end-to-end — typed `LOCRecord` with raw biased wire fields (lat/lon
+in msec biased by 2^31, altitude in cm biased by 10_000_000, three
+precision bytes), wire parser, `LookupLOC` helper, and a presentation
+formatter that decodes to signed degrees + meter precision.
+
+HINFO, RP, AFSDB, NAPTR, KX had been dropped in 68c34d5 on zero-hit
+grounds in a 34K-domain sample. Wire-level support was kept; only the
+resolver-service calls were removed. Restored those 5 LookupX calls.
+
+Coverage now: A, AAAA, CNAME, DNAME, NS, MX, TXT, SOA, LOC, HINFO,
+RP, AFSDB, NAPTR, KX, SSHFP, SVCB, HTTPS, CAA, URI (19 types). TLSA
+omitted (canonical owner is `_<port>._<proto>.<host>`, not the apex).
+DNSSEC types still deferred per Task #20.
+
+**--upstream flag (9600d48).** New `NewWithUpstream(addr)` constructor
+installs a `dns.Resolver.Dial` closure that ignores the system-chosen
+server and dials a fixed addr (e.g. `127.0.0.1:5353`) for every
+query. `cmd/server --upstream=…` exposes it. Used to point dnsfetch
+at a local recursive resolver (unbound) without touching
+`/etc/resolv.conf` — which on macOS is auto-regenerated anyway, and
+which proto-domain shares with the whole host.
+
+**Bench findings from proto-ct (tools/bench_fanout.sh).** Driven by
+the question "why is dnsfetch only doing 19 domains/sec sequential."
+
+Per-domain fanout (parallelizing the 19 LookupX calls inside one
+RPC, behind a worker pool): regression across the board. Best parallel
+config did 13.5/s vs the 19/s sequential baseline. The bottleneck was
+the upstream recursive resolver, not our orchestration — fanout just
+rearranged in-flight queries on a saturated path. Dropped the worker
+pool refactor.
+
+Local unbound on 127.0.0.1:5353 with 4 threads / 1024 in-flight per
+thread / 256 MB msg cache / 512 MB rrset cache: the picture flips.
+At workers=100 the system-resolver path did 19/s; with --upstream
+unbound it did 89/s. Knee at workers=200 = 252/s; workers=400 =
+259/s (+3%); workers=800 = 245/s (regression). Recommended
+production: workers=200 + local unbound, 13× over the prior sequential
+baseline. Errors stayed 0 across all configs; timeouts 1.3-2.1%.
+
+A separate gotcha for the unbound config: by default unbound falls
+back to TCP for truncated answers, and many gov/.gov auths refuse
+TCP from random IPs, flooding the unbound log with "tcp writev:
+Socket is not connected". Set `tcp-upstream: no` for bulk-scan use
+cases — we lose >1232-byte responses but stay quiet.
+
 ## 2026-04-29 (evening — Layer 2 done, TTLs flowing)
 
 **Layer 2 complete + wired in.** `internal/resolver/` now uses
