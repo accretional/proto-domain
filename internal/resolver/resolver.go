@@ -4,7 +4,9 @@
 // Behavior:
 //   - Default *dns.Resolver, so we follow the same DNS path the host
 //     itself uses (/etc/resolv.conf, /etc/hosts) — minus cgo and
-//     Windows. See dns/COVERAGE.md for what's covered.
+//     Windows. See dns/COVERAGE.md for what's covered. NewWithUpstream
+//     overrides this to force all queries at a single addr, used to
+//     point at a local recursive resolver without touching resolv.conf.
 //   - All queries are issued as fully-qualified names (trailing dot) so
 //     that nameList() skips /etc/resolv.conf search-domain suffix
 //     expansion — which otherwise doubles UDP round-trips for NXDOMAIN.
@@ -26,6 +28,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -45,6 +48,20 @@ type Service struct {
 
 // New returns a Service backed by the host resolver.
 func New() *Service { return &Service{} }
+
+// NewWithUpstream returns a Service that forces every DNS query to the
+// supplied address (e.g. "127.0.0.1:5353"), bypassing the system
+// resolver list. Used to point dnsfetch at a local recursive resolver
+// without modifying /etc/resolv.conf.
+func NewWithUpstream(upstream string) *Service {
+	r := &dns.Resolver{
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, upstream)
+		},
+	}
+	return &Service{resolver: r}
+}
 
 // recordSink is the surface GetDNSRecords needs from its output. The
 // real gRPC stream satisfies it; tests substitute an in-memory sink.

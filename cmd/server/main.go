@@ -19,6 +19,7 @@ import (
 func main() {
 	addr := flag.String("addr", "", "listen address (host:port). overrides -port if set")
 	port := flag.Int("port", 50098, "listen port (used when -addr is empty)")
+	upstream := flag.String("upstream", "", "force all DNS queries to this addr (host:port). Empty = use /etc/resolv.conf")
 	flag.Parse()
 
 	bind := *addr
@@ -32,9 +33,15 @@ func main() {
 	}
 
 	srv := grpc.NewServer()
-	domainpb.RegisterResolverServer(srv, resolver.New())
+	var svc *resolver.Service
+	if *upstream != "" {
+		svc = resolver.NewWithUpstream(*upstream)
+	} else {
+		svc = resolver.New()
+	}
+	domainpb.RegisterResolverServer(srv, svc)
 
-	log.Printf("resolver listening on %s", lis.Addr())
+	log.Printf("resolver listening on %s (upstream=%q)", lis.Addr(), *upstream)
 
 	go func() {
 		ch := make(chan os.Signal, 1)
