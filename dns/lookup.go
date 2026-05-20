@@ -31,6 +31,7 @@ import (
 const (
 	TypeRP    dnsmessage.Type = 17
 	TypeAFSDB dnsmessage.Type = 18
+	TypeDNAME dnsmessage.Type = 39
 	TypeNAPTR dnsmessage.Type = 35
 	TypeKX    dnsmessage.Type = 36
 	TypeSSHFP dnsmessage.Type = 44
@@ -164,6 +165,17 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
 			out = append(out, &CNAMERecord{Header: hdr, Target: body.CNAME.String()})
+		case TypeDNAME:
+			// RFC 6672: RDATA is a single domain name in wire format.
+			raw, err := p.UnknownResource()
+			if err != nil {
+				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
+			}
+			target, _, ok := parseWireName(raw.Data, 0)
+			if !ok {
+				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
+			}
+			out = append(out, &DNAMERecord{Header: hdr, Target: target})
 		case dnsmessage.TypeNS:
 			body, err := p.NSResource()
 			if err != nil {

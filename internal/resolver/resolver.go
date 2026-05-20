@@ -8,10 +8,10 @@
 //   - All queries are issued as fully-qualified names (trailing dot) so
 //     that nameList() skips /etc/resolv.conf search-domain suffix
 //     expansion — which otherwise doubles UDP round-trips for NXDOMAIN.
-//   - Queried types: A/AAAA, CNAME, NS, MX, TXT, SOA, SSHFP, SVCB,
-//     HTTPS, CAA, URI. Omitted: HINFO, RP, AFSDB, NAPTR, KX — these
-//     returned no results across a 34K-domain sample and each costs a
-//     serial DNS round-trip.
+//   - Queried types: A/AAAA, CNAME, DNAME, NS, MX, TXT, SOA, SSHFP,
+//     SVCB, HTTPS, CAA, URI. Omitted: HINFO, RP, AFSDB, NAPTR, KX
+//     (zero hits in a 34K-domain sample, each costs a round-trip);
+//     DNSSEC types (DS, DNSKEY) intentionally excluded.
 //   - "No records" / NXDOMAIN per type is silently skipped.
 package resolver
 
@@ -105,6 +105,19 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 				if err := emit(domainpb.DNSRecordType_CNAME, cr.TTL, cr.Target); err != nil {
 					return err
 				}
+			}
+		}
+	}
+
+	// DNAME — RFC 6672: maps the entire subtree below the owner name.
+	if recs, err := r.LookupRecords(ctx, name, dns.TypeDNAME); err == nil {
+		for _, rec := range recs {
+			dr, ok := rec.(*dns.DNAMERecord)
+			if !ok {
+				continue
+			}
+			if err := emit(domainpb.DNSRecordType_DNAME, dr.TTL, dr.Target); err != nil {
+				return err
 			}
 		}
 	}

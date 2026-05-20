@@ -66,6 +66,16 @@ type CNAMERecord struct {
 
 func (r *CNAMERecord) Hdr() *Header { return &r.Header }
 
+// DNAMERecord represents a DNAME (delegation name) RR per RFC 6672.
+// DNAME redirects an entire subtree: all names below the owner name
+// are mapped to the corresponding names below Target.
+type DNAMERecord struct {
+	Header
+	Target string // target domain name in presentation form
+}
+
+func (r *DNAMERecord) Hdr() *Header { return &r.Header }
+
 // NSRecord represents an NS (authoritative name server) RR.
 type NSRecord struct {
 	Header
