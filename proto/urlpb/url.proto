@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package domain;
+package url;
 
-option go_package = "github.com/accretional/proto-domain/proto/domainpb;domainpb";
+option go_package = "github.com/accretional/proto-domain/proto/urlpb;urlpb";
 
 import "proto/domainpb/domain.proto";
 import "proto/ippb/ip.proto";
@@ -41,7 +41,7 @@ message UserInfo {
 message Authority {
   UserInfo user_info = 1;
   oneof host {
-    Domain hostname = 2;
+    domain.Domain hostname = 2;
     ip.IP ip = 3;
   }
   // leave 0 if unspecified

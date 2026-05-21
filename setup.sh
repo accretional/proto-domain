@@ -65,11 +65,12 @@ fi
 echo "  proto-ip located at: $PROTO_IP_DIR"
 
 PROTO_DIR="proto/domainpb"
+URL_PROTO_DIR="proto/urlpb"
 PROTO_FILES=(
     "$PROTO_DIR"/domain.proto
     "$PROTO_DIR"/dns_record.proto
     "$PROTO_DIR"/resolver.proto
-    "$PROTO_DIR"/url.proto
+    "$URL_PROTO_DIR"/url.proto
 )
 
 # Detect whether any .proto is newer than its .pb.go (or stubs missing).
@@ -83,6 +84,9 @@ for src in "${PROTO_FILES[@]}"; do
     fi
 done
 if [[ ! -f "$PROTO_DIR/resolver_grpc.pb.go" ]]; then
+    NEED_REGEN=true
+fi
+if [[ ! -f "$URL_PROTO_DIR/url.pb.go" ]]; then
     NEED_REGEN=true
 fi
 
