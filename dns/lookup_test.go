@@ -3,20 +3,20 @@ package dns
 import (
 	"context"
 	"encoding/hex"
+	"net"
 	"testing"
 	"time"
+
+	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
 
 // TestLookupLocalhost verifies the layer-2 Lookup* path resolves
-// localhost via /etc/hosts (which our hosts.go forks from upstream).
-// This is the cheapest possible end-to-end smoke test for dns/ — it
-// doesn't hit the wire, so it doesn't depend on network access.
+// localhost via /etc/hosts. Doesn't hit the wire.
 func TestLookupLocalhost(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	r := DefaultResolver
-	recs, err := r.LookupIP(ctx, "localhost")
+	recs, err := DefaultResolver.LookupIP(ctx, "localhost")
 	if err != nil {
 		t.Fatalf("LookupIP(localhost): %v", err)
 	}
@@ -25,24 +25,24 @@ func TestLookupLocalhost(t *testing.T) {
 	}
 	hasLoopback := false
 	for _, rec := range recs {
-		switch v := rec.(type) {
-		case *ARecord:
-			if v.IP.String() == "127.0.0.1" {
+		switch b := rec.GetBody().(type) {
+		case *domainpb.DNSRecord_A:
+			if net.IP(b.A.GetIpv4()).String() == "127.0.0.1" {
 				hasLoopback = true
 			}
-		case *AAAARecord:
-			if v.IP.String() == "::1" {
+		case *domainpb.DNSRecord_Aaaa:
+			if net.IP(b.Aaaa.GetIpv6()).String() == "::1" {
 				hasLoopback = true
 			}
 		}
 	}
 	if !hasLoopback {
-		t.Errorf("expected a 127.0.0.1 or ::1 record, got %v", recs)
+		t.Errorf("expected a 127.0.0.1 or ::1 record, got %d records", len(recs))
 	}
 }
 
-// TestLookupSOA_Accretional verifies LookupSOA returns a record with a
-// parseable MBox for a live domain. Skipped with -short.
+// TestLookupSOA_Accretional verifies LookupSOA returns a record with
+// populated fields for a live domain. Skipped with -short.
 func TestLookupSOA_Accretional(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network-dependent test in -short mode")
@@ -57,15 +57,17 @@ func TestLookupSOA_Accretional(t *testing.T) {
 	if len(recs) == 0 {
 		t.Skip("LookupSOA returned no records — no SOA published for accretional.com?")
 	}
-	soa := recs[0]
-	if soa.NS == "" {
-		t.Error("SOA.NS is empty")
+	soa := recs[0].GetSoa()
+	if soa == nil {
+		t.Fatal("first record has no SOA body")
 	}
-	if soa.MBox == "" {
-		t.Error("SOA.MBox is empty")
+	if soa.GetNs() == "" {
+		t.Error("SOA.Ns is empty")
 	}
-	email := MBoxToEmail(soa.MBox)
-	t.Logf("SOA: NS=%s MBox=%s email=%s TTL=%d", soa.NS, soa.MBox, email, soa.TTL)
+	if soa.GetMbox() == "" {
+		t.Error("SOA.Mbox is empty")
+	}
+	t.Logf("SOA: NS=%s MBox=%s serial=%d TTL=%d", soa.GetNs(), soa.GetMbox(), soa.GetSerial(), recs[0].GetTtlSeconds())
 }
 
 // ── Wire-format parser unit tests ────────────────────────────────────────────
@@ -119,70 +121,6 @@ func TestParseWireName(t *testing.T) {
 	}
 }
 
-func TestParseHINFOWire(t *testing.T) {
-	// CPU="INTEL-386" OS="UNIX"
-	data := append([]byte{9}, []byte("INTEL-386")...)
-	data = append(data, 4)
-	data = append(data, []byte("UNIX")...)
-	cpu, off, ok := parseCharString(data, 0)
-	if !ok || cpu != "INTEL-386" {
-		t.Fatalf("CPU: got %q ok=%v", cpu, ok)
-	}
-	os_, _, ok2 := parseCharString(data, off)
-	if !ok2 || os_ != "UNIX" {
-		t.Fatalf("OS: got %q ok=%v", os_, ok2)
-	}
-}
-
-func TestParseSSHFPWire(t *testing.T) {
-	// Algorithm=4 (Ed25519), FpType=2 (SHA-256), 32-byte fingerprint
-	fp := make([]byte, 32)
-	for i := range fp {
-		fp[i] = byte(i)
-	}
-	data := append([]byte{4, 2}, fp...)
-	if len(data) < 2 {
-		t.Fatal("short data")
-	}
-	got := &SSHFPRecord{Algorithm: data[0], FpType: data[1], Fingerprint: data[2:]}
-	if got.Algorithm != 4 || got.FpType != 2 || len(got.Fingerprint) != 32 {
-		t.Errorf("unexpected SSHFP: %+v", got)
-	}
-	t.Logf("fingerprint: %s", hex.EncodeToString(got.Fingerprint))
-}
-
-func TestParseCAAWire(t *testing.T) {
-	// flags=0, tag="issue", value="letsencrypt.org"
-	tag := "issue"
-	val := "letsencrypt.org"
-	data := []byte{0, byte(len(tag))}
-	data = append(data, []byte(tag)...)
-	data = append(data, []byte(val)...)
-
-	flags := data[0]
-	tagLen := int(data[1])
-	gotTag := string(data[2 : 2+tagLen])
-	gotVal := string(data[2+tagLen:])
-	if flags != 0 || gotTag != "issue" || gotVal != "letsencrypt.org" {
-		t.Errorf("CAA parse: flags=%d tag=%q val=%q", flags, gotTag, gotVal)
-	}
-}
-
-func TestParseURIWire(t *testing.T) {
-	// priority=10, weight=1, target="mailto:admin@example.com"
-	target := "mailto:admin@example.com"
-	data := []byte{0, 10, 0, 1}
-	data = append(data, []byte(target)...)
-	rec := &URIRecord{
-		Priority: uint16(data[0])<<8 | uint16(data[1]),
-		Weight:   uint16(data[2])<<8 | uint16(data[3]),
-		Target:   string(data[4:]),
-	}
-	if rec.Priority != 10 || rec.Weight != 1 || rec.Target != target {
-		t.Errorf("URI parse: %+v", rec)
-	}
-}
-
 func TestParseSVCBParamsWire(t *testing.T) {
 	// Two params: key=1 val=[0,1], key=4 val=[10,0,0,1]
 	data := []byte{
@@ -193,18 +131,16 @@ func TestParseSVCBParamsWire(t *testing.T) {
 	if !ok || len(params) != 2 {
 		t.Fatalf("parseSVCBParams: ok=%v len=%d", ok, len(params))
 	}
-	if params[0].Key != 1 || len(params[0].Value) != 2 {
+	if params[0].GetKey() != 1 || len(params[0].GetValue()) != 2 {
 		t.Errorf("param[0]: %+v", params[0])
 	}
-	if params[1].Key != 4 || len(params[1].Value) != 4 {
+	if params[1].GetKey() != 4 || len(params[1].GetValue()) != 4 {
 		t.Errorf("param[1]: %+v", params[1])
 	}
 }
 
 // ── Live DNS smoke tests ──────────────────────────────────────────────────────
 
-// TestLookupAccretional hits the live network (LET_IT_RIP territory).
-// We expose it as a regular test but skip when -short is set.
 func TestLookupAccretional(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network-dependent test in -short mode")
@@ -212,29 +148,24 @@ func TestLookupAccretional(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	r := DefaultResolver
-	mxs, err := r.LookupMX(ctx, "accretional.com")
+	mxs, err := DefaultResolver.LookupMX(ctx, "accretional.com")
 	if err != nil {
 		t.Fatalf("LookupMX(accretional.com): %v", err)
 	}
 	if len(mxs) == 0 {
 		t.Skipf("LookupMX returned no records — flaky network?")
 	}
-	// We don't assert specific MX hosts (DNS records change). We just
-	// want a TTL > 0 to confirm the new path actually returns it.
 	hasTTL := false
-	for _, mx := range mxs {
-		if mx.TTL > 0 {
+	for _, rec := range mxs {
+		if rec.GetTtlSeconds() > 0 {
 			hasTTL = true
 		}
 	}
 	if !hasTTL {
-		t.Errorf("expected at least one MX record with TTL > 0, got %v", mxs)
+		t.Errorf("expected at least one MX record with TTL > 0, got %d records", len(mxs))
 	}
 }
 
-// TestLookupCAA_Accretional checks for CAA records. Most domains publish at
-// least one; we skip gracefully if none are found.
 func TestLookupCAA_Accretional(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network-dependent test in -short mode")
@@ -246,12 +177,12 @@ func TestLookupCAA_Accretional(t *testing.T) {
 	if err != nil || len(recs) == 0 {
 		t.Skipf("no CAA records for accretional.com (err=%v)", err)
 	}
-	for _, r := range recs {
-		t.Logf("CAA: flags=%d tag=%q value=%q TTL=%d", r.Flags, r.Tag, r.Value, r.TTL)
+	for _, rec := range recs {
+		caa := rec.GetCaa()
+		t.Logf("CAA: flags=%d tag=%q value=%q TTL=%d", caa.GetFlags(), caa.GetTag(), caa.GetValue(), rec.GetTtlSeconds())
 	}
 }
 
-// TestLookupHTTPS_Accretional checks for HTTPS RRs (RFC 9460).
 func TestLookupHTTPS_Accretional(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network-dependent test in -short mode")
@@ -266,12 +197,13 @@ func TestLookupHTTPS_Accretional(t *testing.T) {
 	if len(recs) == 0 {
 		t.Skip("no HTTPS records published for accretional.com")
 	}
-	for _, r := range recs {
-		t.Logf("HTTPS: priority=%d target=%q params=%d TTL=%d", r.Priority, r.TargetName, len(r.Params), r.TTL)
+	for _, rec := range recs {
+		https := rec.GetHttps()
+		t.Logf("HTTPS: priority=%d target=%q params=%d TTL=%d",
+			https.GetPriority(), https.GetTargetName(), len(https.GetParams()), rec.GetTtlSeconds())
 	}
 }
 
-// TestLookupSSHFP_Accretional checks for SSHFP records.
 func TestLookupSSHFP_Accretional(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network-dependent test in -short mode")
@@ -283,13 +215,13 @@ func TestLookupSSHFP_Accretional(t *testing.T) {
 	if err != nil || len(recs) == 0 {
 		t.Skipf("no SSHFP records for accretional.com (err=%v)", err)
 	}
-	for _, r := range recs {
-		t.Logf("SSHFP: algo=%d fptype=%d fp=%s TTL=%d", r.Algorithm, r.FpType, hex.EncodeToString(r.Fingerprint), r.TTL)
+	for _, rec := range recs {
+		s := rec.GetSshfp()
+		t.Logf("SSHFP: algo=%d fptype=%d fp=%s TTL=%d",
+			s.GetAlgorithm(), s.GetFpType(), hex.EncodeToString(s.GetFingerprint()), rec.GetTtlSeconds())
 	}
 }
 
-// TestLookupURI_Accretional verifies URI record lookup once set-owner-uri
-// has been run against accretional.com.
 func TestLookupURI_Accretional(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network-dependent test in -short mode")
@@ -301,7 +233,9 @@ func TestLookupURI_Accretional(t *testing.T) {
 	if err != nil || len(recs) == 0 {
 		t.Skipf("no URI records for accretional.com yet (err=%v)", err)
 	}
-	for _, r := range recs {
-		t.Logf("URI: priority=%d weight=%d target=%q TTL=%d", r.Priority, r.Weight, r.Target, r.TTL)
+	for _, rec := range recs {
+		u := rec.GetUri()
+		t.Logf("URI: priority=%d weight=%d target=%q TTL=%d",
+			u.GetPriority(), u.GetWeight(), u.GetTarget(), rec.GetTtlSeconds())
 	}
 }

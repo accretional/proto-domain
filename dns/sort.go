@@ -3,25 +3,25 @@
 // license that can be found in the LICENSE_GO file.
 //
 // Adapted from $GOROOT/src/net/dnsclient.go (byPriorityWeight, byPref).
-// We work on typed *MXRecord / *SRVRecord slices directly so the
-// returned API doesn't expose the upstream-shaped MX/SRV types.
 
 package dns
 
 import (
 	"cmp"
 	"slices"
+
+	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
 
 // sortMXRecords sorts MX records by Pref ascending. Records with equal
-// Pref are shuffled (RFC 5321).
-func sortMXRecords(out []*MXRecord) {
+// Pref are shuffled (RFC 5321). All records must carry an MX body.
+func sortMXRecords(out []*domainpb.DNSRecord) {
 	for i := range out {
 		j := randIntn(i + 1)
 		out[i], out[j] = out[j], out[i]
 	}
-	slices.SortFunc(out, func(a, b *MXRecord) int {
-		return cmp.Compare(a.Pref, b.Pref)
+	slices.SortFunc(out, func(a, b *domainpb.DNSRecord) int {
+		return cmp.Compare(a.GetMx().GetPref(), b.GetMx().GetPref())
 	})
 }
 

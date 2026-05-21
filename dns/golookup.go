@@ -3,24 +3,24 @@
 // license that can be found in the LICENSE_GO file.
 //
 // Adapted from the bottom half of $GOROOT/src/net/dnsclient_unix.go
-// (the goLookupX implementations). See ./README.md for fork policy and
-// ./COVERAGE.md for what's covered.
+// (the goLookupX implementations). See ./README.md for fork policy.
 //
 // Differences from upstream:
 //
 //   - TTL preservation: every record returned carries its
-//     ResourceHeader.TTL on a Header field. Upstream parses this same
+//     ResourceHeader.TTL on TtlSeconds. Upstream parses this same
 //     value and discards it.
+//   - Returns *domainpb.DNSRecord directly rather than upstream's
+//     net.IPAddr / net.MX / net.NS / etc. The proto schema is the
+//     single source of typed records.
 //   - No parallel A+AAAA fanout: upstream queries A and AAAA in
 //     parallel via a goroutine + channel + dnsWaitGroup. We do them
 //     sequentially. The wire savings of parallel only materialize on
 //     slow servers, and the dnsWaitGroup orchestration pulls in
 //     package-level state we'd rather not fork.
 //   - No hostLookupOrder enum: we always do FilesDNS (try /etc/hosts
-//     first, fall back to DNS). That matches the macOS / Linux default
-//     for non-mDNS names. The cgo path doesn't apply.
-//   - Errors are *net.DNSError (already exported from package net) —
-//     no separate fork of the DNSError type.
+//     first, fall back to DNS).
+//   - Errors are *net.DNSError (already exported from package net).
 //
 // Material changes vs upstream are flagged with "// fork:" comments.
 
@@ -31,13 +31,13 @@ import (
 	"net"
 
 	"golang.org/x/net/dns/dnsmessage"
+
+	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
 
-// goLookupIPCNAMEOrder is the workhorse behind LookupHost / LookupIP /
-// LookupCNAME. It first tries /etc/hosts; if no entries exist it issues
-// A and AAAA queries (and CNAME if asked) and walks the answer section.
-//
-// The return value carries typed records with TTLs preserved.
+// goLookupIPCNAMEOrder is the workhorse behind LookupIP / LookupCNAME.
+// It first tries /etc/hosts; if no entries exist it issues A and AAAA
+// queries (and CNAME if asked) and walks the answer section.
 //
 // `network` selects which families to query:
 //
@@ -45,23 +45,25 @@ import (
 //	"ip4"            → A only
 //	"ip6"            → AAAA only
 //	"CNAME"          → A + AAAA + CNAME (used by goLookupCNAME)
-func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name string, conf *dnsConfig) (records []Record, cname string, err error) {
+func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name string, conf *dnsConfig) (records []*domainpb.DNSRecord, cname string, err error) {
 	// /etc/hosts first.
 	if addrs, canonical := lookupStaticHost(name); len(addrs) > 0 {
 		// fork: upstream returns IPAddr; we synthesize ARecord/AAAARecord
-		// with TTL=0 (a hosts file has no TTL).
+		// proto bodies with TTL=0 (a hosts file has no TTL).
 		for _, a := range addrs {
 			ip := net.ParseIP(a)
 			if ip == nil {
 				continue
 			}
-			hdr := Header{Name: absDomainName(name), Class: dnsmessage.ClassINET}
+			h := dnsmessage.ResourceHeader{TTL: 0, Class: dnsmessage.ClassINET}
 			if v4 := ip.To4(); v4 != nil {
-				hdr.Type = dnsmessage.TypeA
-				records = append(records, &ARecord{Header: hdr, IP: v4})
+				h.Type = dnsmessage.TypeA
+				records = append(records, newRecord(h, domainpb.DNSRecordType_A,
+					&domainpb.ARecord{Ipv4: append([]byte(nil), v4...)}))
 			} else {
-				hdr.Type = dnsmessage.TypeAAAA
-				records = append(records, &AAAARecord{Header: hdr, IP: ip})
+				h.Type = dnsmessage.TypeAAAA
+				records = append(records, newRecord(h, domainpb.DNSRecordType_AAAA,
+					&domainpb.AAAARecord{Ipv6: append([]byte(nil), ip.To16()...)}))
 			}
 		}
 		if len(records) > 0 {
@@ -117,7 +119,6 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 	}
 
 	if dnsErr, ok := lastErr.(*net.DNSError); ok {
-		// Show the original name passed to lookup, not a suffixed one.
 		dnsErr.Name = name
 	}
 
@@ -132,9 +133,10 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
 }
 
 // parseAddressAnswers walks an answer section for A / AAAA / CNAME
-// records and returns typed records. Helper for goLookupIPCNAMEOrder.
-func parseAddressAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmessage.Type) ([]Record, string, error) {
-	var records []Record
+// records and returns them as DNSRecord values. Helper for
+// goLookupIPCNAMEOrder.
+func parseAddressAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmessage.Type) ([]*domainpb.DNSRecord, string, error) {
+	var records []*domainpb.DNSRecord
 	var cname string
 	for {
 		h, err := p.AnswerHeader()
@@ -144,15 +146,14 @@ func parseAddressAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 		if err != nil {
 			return nil, "", &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 		}
-		hdr := Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL}
 		switch h.Type {
 		case dnsmessage.TypeA:
 			a, err := p.AResource()
 			if err != nil {
 				return nil, "", &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 			}
-			ip := net.IP(a.A[:])
-			records = append(records, &ARecord{Header: hdr, IP: ip})
+			records = append(records, newRecord(h, domainpb.DNSRecordType_A,
+				&domainpb.ARecord{Ipv4: append([]byte(nil), a.A[:]...)}))
 			if cname == "" && h.Name.Length != 0 {
 				cname = h.Name.String()
 			}
@@ -161,8 +162,8 @@ func parseAddressAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if err != nil {
 				return nil, "", &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 			}
-			ip := net.IP(aaaa.AAAA[:])
-			records = append(records, &AAAARecord{Header: hdr, IP: ip})
+			records = append(records, newRecord(h, domainpb.DNSRecordType_AAAA,
+				&domainpb.AAAARecord{Ipv6: append([]byte(nil), aaaa.AAAA[:]...)}))
 			if cname == "" && h.Name.Length != 0 {
 				cname = h.Name.String()
 			}
@@ -172,7 +173,8 @@ func parseAddressAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 				return nil, "", &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 			}
 			target := c.CNAME.String()
-			records = append(records, &CNAMERecord{Header: hdr, Target: target})
+			records = append(records, newRecord(h, domainpb.DNSRecordType_CNAME,
+				&domainpb.CNAMERecord{Target: target}))
 			if cname == "" && c.CNAME.Length > 0 {
 				cname = target
 			}
@@ -192,13 +194,13 @@ func (r *Resolver) goLookupCNAME(ctx context.Context, host string, conf *dnsConf
 	return cname, err
 }
 
-// goLookupNS returns NS records for name, with TTLs preserved.
-func (r *Resolver) goLookupNS(ctx context.Context, name string, conf *dnsConfig) ([]*NSRecord, error) {
+// goLookupNS returns NS records for name.
+func (r *Resolver) goLookupNS(ctx context.Context, name string, conf *dnsConfig) ([]*domainpb.DNSRecord, error) {
 	p, server, err := r.lookup(ctx, name, dnsmessage.TypeNS, conf)
 	if err != nil {
 		return nil, err
 	}
-	var out []*NSRecord
+	var out []*domainpb.DNSRecord
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -217,21 +219,18 @@ func (r *Resolver) goLookupNS(ctx context.Context, name string, conf *dnsConfig)
 		if err != nil {
 			return nil, &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 		}
-		out = append(out, &NSRecord{
-			Header: Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL},
-			Host:   ns.NS.String(),
-		})
+		out = append(out, newRecord(h, domainpb.DNSRecordType_NS,
+			&domainpb.NSRecord{Host: ns.NS.String()}))
 	}
 }
 
-// goLookupMX returns MX records for name, with TTLs preserved. The
-// returned slice is sorted by Pref (RFC 5321).
-func (r *Resolver) goLookupMX(ctx context.Context, name string, conf *dnsConfig) ([]*MXRecord, error) {
+// goLookupMX returns MX records for name, sorted by preference.
+func (r *Resolver) goLookupMX(ctx context.Context, name string, conf *dnsConfig) ([]*domainpb.DNSRecord, error) {
 	p, server, err := r.lookup(ctx, name, dnsmessage.TypeMX, conf)
 	if err != nil {
 		return nil, err
 	}
-	var out []*MXRecord
+	var out []*domainpb.DNSRecord
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -250,31 +249,24 @@ func (r *Resolver) goLookupMX(ctx context.Context, name string, conf *dnsConfig)
 		if err != nil {
 			return nil, &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 		}
-		out = append(out, &MXRecord{
-			Header: Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL},
-			Pref:   mx.Pref,
-			Host:   mx.MX.String(),
-		})
+		out = append(out, newRecord(h, domainpb.DNSRecordType_MX,
+			&domainpb.MXRecord{Pref: uint32(mx.Pref), Host: mx.MX.String()}))
 	}
-	// fork: upstream sort uses byPref over []*MX. We sort by Pref ascending
-	// directly on the typed slice.
 	sortMXRecords(out)
 	return out, nil
 }
 
-// goLookupTXT returns TXT records for name, with TTLs preserved.
+// goLookupTXT returns TXT records for name.
 //
 // fork: upstream concatenates all character-strings inside a single TXT
 // RR into one string. We preserve the per-fragment slice — callers that
-// want stdlib-equivalent behavior can `strings.Join(rec.Strings, "")`.
-// The fragments are usually a single string anyway; preserving them
-// keeps tooling that needs the wire form (e.g. SPF debugging) honest.
-func (r *Resolver) goLookupTXT(ctx context.Context, name string, conf *dnsConfig) ([]*TXTRecord, error) {
+// want stdlib-equivalent behavior can `strings.Join(rec.GetTxt().GetStrings(), "")`.
+func (r *Resolver) goLookupTXT(ctx context.Context, name string, conf *dnsConfig) ([]*domainpb.DNSRecord, error) {
 	p, server, err := r.lookup(ctx, name, dnsmessage.TypeTXT, conf)
 	if err != nil {
 		return nil, err
 	}
-	var out []*TXTRecord
+	var out []*domainpb.DNSRecord
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -293,19 +285,15 @@ func (r *Resolver) goLookupTXT(ctx context.Context, name string, conf *dnsConfig
 		if err != nil {
 			return nil, &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 		}
-		out = append(out, &TXTRecord{
-			Header:  Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL},
-			Strings: append([]string(nil), txt.TXT...),
-		})
+		out = append(out, newRecord(h, domainpb.DNSRecordType_TXT,
+			&domainpb.TXTRecord{Strings: append([]string(nil), txt.TXT...)}))
 	}
 	return out, nil
 }
 
-// goLookupSRV issues an SRV query and returns sorted records (priority
-// then weight per RFC 2782). cname is the queried target's canonical
-// form (the queried name unless redirected by CNAME — uncommon for
-// SRV). When service+proto are empty, name is queried directly;
-// otherwise the wire query is "_<service>._<proto>.<name>."
+// goLookupSRV issues an SRV query and returns sorted records. SRV does
+// not have a proto body type yet, so this still returns the local
+// SRVRecord shape.
 func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string, conf *dnsConfig) (cname string, records []*SRVRecord, err error) {
 	target := name
 	if service != "" || proto != "" {
@@ -337,7 +325,8 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string,
 			return "", nil, &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: name, Server: server}
 		}
 		records = append(records, &SRVRecord{
-			Header:   Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL},
+			Name:     h.Name.String(),
+			TTL:      h.TTL,
 			Priority: srv.Priority,
 			Weight:   srv.Weight,
 			Port:     srv.Port,
@@ -348,20 +337,11 @@ func (r *Resolver) goLookupSRV(ctx context.Context, service, proto, name string,
 	return cname, records, nil
 }
 
-// goLookupPTR issues a PTR query for the reverse DNS name of addr and
-// returns the matching records, with TTLs preserved.
-func (r *Resolver) goLookupPTR(ctx context.Context, addr string, conf *dnsConfig) ([]*PTRRecord, error) {
-	// Try /etc/hosts first.
+// goLookupPTR issues a PTR query for the reverse DNS name of addr.
+// PTR has no proto body type yet, so this returns plain target strings.
+func (r *Resolver) goLookupPTR(ctx context.Context, addr string, conf *dnsConfig) ([]string, error) {
 	if names := lookupStaticAddr(addr); len(names) > 0 {
-		// fork: synthesize PTR records with TTL=0 (a hosts file has no TTL).
-		out := make([]*PTRRecord, 0, len(names))
-		for _, n := range names {
-			out = append(out, &PTRRecord{
-				Header: Header{Name: addr, Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET},
-				Target: n,
-			})
-		}
-		return out, nil
+		return names, nil
 	}
 	arpa, err := reverseaddr(addr)
 	if err != nil {
@@ -371,7 +351,7 @@ func (r *Resolver) goLookupPTR(ctx context.Context, addr string, conf *dnsConfig
 	if err != nil {
 		return nil, err
 	}
-	var out []*PTRRecord
+	var out []string
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -390,10 +370,7 @@ func (r *Resolver) goLookupPTR(ctx context.Context, addr string, conf *dnsConfig
 		if err != nil {
 			return nil, &net.DNSError{Err: errCannotUnmarshalDNSMessage.Error(), Name: addr, Server: server}
 		}
-		out = append(out, &PTRRecord{
-			Header: Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL},
-			Target: ptr.PTR.String(),
-		})
+		out = append(out, ptr.PTR.String())
 	}
 	return out, nil
 }

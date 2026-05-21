@@ -7,16 +7,15 @@
 //
 // Differences from upstream:
 //
-//   - All Lookup* methods return TTL-aware typed records (defined in
-//     records.go). Upstream returns TTL-less stdlib types — we expose
-//     full Header on every record.
+//   - All Lookup* methods return []*domainpb.DNSRecord with the typed
+//     body populated. Upstream returns TTL-less stdlib types; we
+//     expose the wire-faithful proto schema directly so callers don't
+//     need a translation layer.
 //   - LookupPort is omitted (it's an /etc/services lookup, not DNS).
 //   - LookupHost / LookupIP / LookupNetIP wrappers omitted; callers
-//     can read the IP off the returned ARecord / AAAARecord.
+//     can read the IP off the returned ARecord / AAAARecord body.
 //   - No singleflight dedup (cheap to add later via golang.org/x/sync
 //     if we observe duplicate concurrent lookups in practice).
-//
-// Material changes vs upstream are flagged with "// fork:" comments.
 
 package dns
 
@@ -25,6 +24,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/dns/dnsmessage"
+
+	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
 
 // RR type codes not defined by golang.org/x/net/dns/dnsmessage.
@@ -90,8 +91,8 @@ func parseWireName(data []byte, off int) (name string, newOff int, ok bool) {
 
 // parseSVCBParams reads SVCB/HTTPS SvcParams from data[off:end].
 // Each param is: 2-byte key, 2-byte value-length, value bytes.
-func parseSVCBParams(data []byte, off int) ([]SVCBParam, bool) {
-	var params []SVCBParam
+func parseSVCBParams(data []byte, off int) ([]*domainpb.SvcbParam, bool) {
+	var params []*domainpb.SvcbParam
 	for off < len(data) {
 		if off+4 > len(data) {
 			return nil, false
@@ -104,20 +105,85 @@ func parseSVCBParams(data []byte, off int) ([]SVCBParam, bool) {
 		}
 		val := make([]byte, vlen)
 		copy(val, data[off:off+vlen])
-		params = append(params, SVCBParam{Key: key, Value: val})
+		params = append(params, &domainpb.SvcbParam{Key: uint32(key), Value: val})
 		off += vlen
 	}
 	return params, true
 }
 
+// newRecord constructs a DNSRecord with type and ttl from the wire header
+// and the supplied typed body case. Target and Class are caller-owned
+// (see internal/resolver/resolver.go).
+func newRecord(h dnsmessage.ResourceHeader, t domainpb.DNSRecordType, body isDNSRecordBody) *domainpb.DNSRecord {
+	rec := &domainpb.DNSRecord{Type: t, TtlSeconds: int32(h.TTL)}
+	switch b := body.(type) {
+	case *domainpb.ARecord:
+		rec.Body = &domainpb.DNSRecord_A{A: b}
+	case *domainpb.AAAARecord:
+		rec.Body = &domainpb.DNSRecord_Aaaa{Aaaa: b}
+	case *domainpb.CNAMERecord:
+		rec.Body = &domainpb.DNSRecord_Cname{Cname: b}
+	case *domainpb.DNAMERecord:
+		rec.Body = &domainpb.DNSRecord_Dname{Dname: b}
+	case *domainpb.NSRecord:
+		rec.Body = &domainpb.DNSRecord_Ns{Ns: b}
+	case *domainpb.MXRecord:
+		rec.Body = &domainpb.DNSRecord_Mx{Mx: b}
+	case *domainpb.TXTRecord:
+		rec.Body = &domainpb.DNSRecord_Txt{Txt: b}
+	case *domainpb.SOARecord:
+		rec.Body = &domainpb.DNSRecord_Soa{Soa: b}
+	case *domainpb.LOCRecord:
+		rec.Body = &domainpb.DNSRecord_Loc{Loc: b}
+	case *domainpb.HINFORecord:
+		rec.Body = &domainpb.DNSRecord_Hinfo{Hinfo: b}
+	case *domainpb.RPRecord:
+		rec.Body = &domainpb.DNSRecord_Rp{Rp: b}
+	case *domainpb.AFSDBRecord:
+		rec.Body = &domainpb.DNSRecord_Afsdb{Afsdb: b}
+	case *domainpb.NAPTRRecord:
+		rec.Body = &domainpb.DNSRecord_Naptr{Naptr: b}
+	case *domainpb.KXRecord:
+		rec.Body = &domainpb.DNSRecord_Kx{Kx: b}
+	case *domainpb.SSHFPRecord:
+		rec.Body = &domainpb.DNSRecord_Sshfp{Sshfp: b}
+	case *domainpb.SVCBRecord:
+		rec.Body = &domainpb.DNSRecord_Svcb{Svcb: b}
+	case *domainpb.HTTPSRecord:
+		rec.Body = &domainpb.DNSRecord_Https{Https: b}
+	case *domainpb.CAARecord:
+		rec.Body = &domainpb.DNSRecord_Caa{Caa: b}
+	case *domainpb.URIRecord:
+		rec.Body = &domainpb.DNSRecord_Uri{Uri: b}
+	}
+	return rec
+}
+
+// isDNSRecordBody is the local marker for typed body messages. Each
+// per-type proto message satisfies it implicitly via being a possible
+// argument to newRecord. (We can't reference domainpb's unexported
+// isDNSRecord_Body interface from outside that package.)
+type isDNSRecordBody any
+
+// SRVRecord is the only typed body proto-domain still keeps outside of
+// domainpb. SRV isn't emitted by GetDNSRecords (it requires a service-
+// prefixed query name, not the apex), but the LookupSRV API is exposed
+// for direct callers — and proto-domain hasn't yet added an SRVRecord
+// proto message. When that changes, this type can move to domainpb
+// and the SRV-specific paths in sort.go can use the proto body.
+type SRVRecord struct {
+	Name     string
+	TTL      uint32
+	Priority uint16
+	Weight   uint16
+	Port     uint16
+	Target   string
+}
+
 // LookupRecords is the generic entry point: send a single query for
 // `qtype` against the system resolver, return every matching record
-// from the answer section with TTLs preserved.
-//
-// Use this when you need a record type the typed Lookup* methods
-// don't cover, or when you want a homogeneous []Record to walk
-// generically (caching, rendering, validation).
-func (r *Resolver) LookupRecords(ctx context.Context, name string, qtype dnsmessage.Type) ([]Record, error) {
+// from the answer section. Body cases match the type.
+func (r *Resolver) LookupRecords(ctx context.Context, name string, qtype dnsmessage.Type) ([]*domainpb.DNSRecord, error) {
 	conf := getSystemDNSConfig()
 	p, server, err := r.lookup(ctx, name, qtype, conf)
 	if err != nil {
@@ -126,12 +192,10 @@ func (r *Resolver) LookupRecords(ctx context.Context, name string, qtype dnsmess
 	return parseGenericAnswers(&p, server, name, qtype)
 }
 
-// parseGenericAnswers walks the answer section and returns one typed
-// Record per RR matching qtype. Unsupported types are skipped silently
-// — callers that need every type should use a typed Lookup* method
-// (until we add records for the long-tail types in Layer 3).
-func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmessage.Type) ([]Record, error) {
-	var out []Record
+// parseGenericAnswers walks the answer section and returns one DNSRecord
+// per RR matching qtype. Unsupported types are skipped silently.
+func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmessage.Type) ([]*domainpb.DNSRecord, error) {
+	var out []*domainpb.DNSRecord
 	for {
 		h, err := p.AnswerHeader()
 		if err == dnsmessage.ErrSectionDone {
@@ -146,28 +210,29 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			}
 			continue
 		}
-		hdr := Header{Name: h.Name.String(), Type: h.Type, Class: h.Class, TTL: h.TTL}
 		switch h.Type {
 		case dnsmessage.TypeA:
 			body, err := p.AResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &ARecord{Header: hdr, IP: body.A[:]})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_A,
+				&domainpb.ARecord{Ipv4: append([]byte(nil), body.A[:]...)}))
 		case dnsmessage.TypeAAAA:
 			body, err := p.AAAAResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &AAAARecord{Header: hdr, IP: body.AAAA[:]})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_AAAA,
+				&domainpb.AAAARecord{Ipv6: append([]byte(nil), body.AAAA[:]...)}))
 		case dnsmessage.TypeCNAME:
 			body, err := p.CNAMEResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &CNAMERecord{Header: hdr, Target: body.CNAME.String()})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_CNAME,
+				&domainpb.CNAMERecord{Target: body.CNAME.String()}))
 		case TypeDNAME:
-			// RFC 6672: RDATA is a single domain name in wire format.
 			raw, err := p.UnknownResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -176,57 +241,51 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &DNAMERecord{Header: hdr, Target: target})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_DNAME,
+				&domainpb.DNAMERecord{Target: target}))
 		case dnsmessage.TypeNS:
 			body, err := p.NSResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &NSRecord{Header: hdr, Host: body.NS.String()})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_NS,
+				&domainpb.NSRecord{Host: body.NS.String()}))
 		case dnsmessage.TypeMX:
 			body, err := p.MXResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &MXRecord{Header: hdr, Pref: body.Pref, Host: body.MX.String()})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_MX,
+				&domainpb.MXRecord{Pref: uint32(body.Pref), Host: body.MX.String()}))
 		case dnsmessage.TypeTXT:
 			body, err := p.TXTResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &TXTRecord{Header: hdr, Strings: append([]string(nil), body.TXT...)})
-		case dnsmessage.TypeSRV:
-			body, err := p.SRVResource()
-			if err != nil {
-				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
-			}
-			out = append(out, &SRVRecord{
-				Header: hdr, Priority: body.Priority, Weight: body.Weight,
-				Port: body.Port, Target: body.Target.String(),
-			})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_TXT,
+				&domainpb.TXTRecord{Strings: append([]string(nil), body.TXT...)}))
 		case dnsmessage.TypePTR:
-			body, err := p.PTRResource()
-			if err != nil {
+			// PTR has no proto body type; skip. PTRs come back via
+			// LookupPTR, which has its own custom path.
+			if err := p.SkipAnswer(); err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &PTRRecord{Header: hdr, Target: body.PTR.String()})
 		case dnsmessage.TypeSOA:
 			body, err := p.SOAResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &SOARecord{
-				Header:  hdr,
-				NS:      body.NS.String(),
-				MBox:    body.MBox.String(),
-				Serial:  body.Serial,
-				Refresh: body.Refresh,
-				Retry:   body.Retry,
-				Expire:  body.Expire,
-				MinTTL:  body.MinTTL,
-			})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_SOA,
+				&domainpb.SOARecord{
+					Ns:      body.NS.String(),
+					Mbox:    body.MBox.String(),
+					Serial:  body.Serial,
+					Refresh: body.Refresh,
+					Retry:   body.Retry,
+					Expire:  body.Expire,
+					MinTtl:  body.MinTTL,
+				}))
 		case dnsmessage.TypeHINFO:
-			// RFC 1035 §3.3.2: two character-strings (CPU, OS).
 			raw, err := p.UnknownResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -236,9 +295,9 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok || !ok2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &HINFORecord{Header: hdr, CPU: cpu, OS: os_})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_HINFO,
+				&domainpb.HINFORecord{Cpu: cpu, Os: os_}))
 		case TypeRP:
-			// RFC 1183: two uncompressed wire-format names (mbox, txt).
 			raw, err := p.UnknownResource()
 			if err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -248,9 +307,9 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok || !ok2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &RPRecord{Header: hdr, Mbox: mbox, Txt: txt})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_RP,
+				&domainpb.RPRecord{Mbox: mbox, Txt: txt}))
 		case TypeAFSDB:
-			// RFC 1183: 2-byte subtype, uncompressed domain name.
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -260,10 +319,9 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &AFSDBRecord{Header: hdr, Subtype: subtype, Hostname: host})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_AFSDB,
+				&domainpb.AFSDBRecord{Subtype: uint32(subtype), Hostname: host}))
 		case TypeLOC:
-			// RFC 1876: version(1), size(1), horiz_pre(1), vert_pre(1),
-			// latitude(4), longitude(4), altitude(4) — total 16 bytes.
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 16 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -272,18 +330,17 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			u32 := func(i int) uint32 {
 				return uint32(d[i])<<24 | uint32(d[i+1])<<16 | uint32(d[i+2])<<8 | uint32(d[i+3])
 			}
-			out = append(out, &LOCRecord{
-				Header:    hdr,
-				Version:   d[0],
-				Size:      d[1],
-				HorizPre:  d[2],
-				VertPre:   d[3],
-				Latitude:  u32(4),
-				Longitude: u32(8),
-				Altitude:  u32(12),
-			})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_LOC,
+				&domainpb.LOCRecord{
+					Version:   uint32(d[0]),
+					Size:      uint32(d[1]),
+					HorizPre:  uint32(d[2]),
+					VertPre:   uint32(d[3]),
+					Latitude:  u32(4),
+					Longitude: u32(8),
+					Altitude:  u32(12),
+				}))
 		case TypeNAPTR:
-			// RFC 3403: order(2), preference(2), flags(cs), service(cs), regexp(cs), replacement(name).
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 4 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -297,12 +354,16 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok1 || !ok2 || !ok3 || !ok4 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &NAPTRRecord{
-				Header: hdr, Order: order, Preference: pref,
-				Flags: flags, Service: svc, Regexp: re, Replacement: repl,
-			})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_NAPTR,
+				&domainpb.NAPTRRecord{
+					Order:       uint32(order),
+					Preference:  uint32(pref),
+					Flags:       flags,
+					Service:     svc,
+					Regexp:      re,
+					Replacement: repl,
+				}))
 		case TypeKX:
-			// RFC 2230: 2-byte preference, uncompressed domain name.
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -312,32 +373,22 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &KXRecord{Header: hdr, Preference: pref, Exchanger: host})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_KX,
+				&domainpb.KXRecord{Preference: uint32(pref), Exchanger: host}))
 		case TypeSSHFP:
-			// RFC 4255: algorithm(1), fp_type(1), fingerprint(rest).
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
 			fp := make([]byte, len(raw.Data)-2)
 			copy(fp, raw.Data[2:])
-			out = append(out, &SSHFPRecord{
-				Header: hdr, Algorithm: raw.Data[0], FpType: raw.Data[1], Fingerprint: fp,
-			})
-		case TypeTLSA:
-			// RFC 6698: usage(1), selector(1), matching_type(1), cert_assoc_data(rest).
-			raw, err := p.UnknownResource()
-			if err != nil || len(raw.Data) < 3 {
-				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
-			}
-			cad := make([]byte, len(raw.Data)-3)
-			copy(cad, raw.Data[3:])
-			out = append(out, &TLSARecord{
-				Header: hdr, Usage: raw.Data[0], Selector: raw.Data[1],
-				MatchingType: raw.Data[2], CertAssocData: cad,
-			})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_SSHFP,
+				&domainpb.SSHFPRecord{
+					Algorithm:   uint32(raw.Data[0]),
+					FpType:      uint32(raw.Data[1]),
+					Fingerprint: fp,
+				}))
 		case TypeSVCB:
-			// RFC 9460: priority(2), target-name(wire), svcparams(rest).
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -351,9 +402,9 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &SVCBRecord{Header: hdr, Priority: pri, TargetName: target, Params: params})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_SVCB,
+				&domainpb.SVCBRecord{Priority: uint32(pri), TargetName: target, Params: params}))
 		case TypeHTTPS:
-			// RFC 9460: same wire format as SVCB, distinct RR type.
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -367,9 +418,9 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			if !ok {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &HTTPSRecord{Header: hdr, Priority: pri, TargetName: target, Params: params})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_HTTPS,
+				&domainpb.HTTPSRecord{Priority: uint32(pri), TargetName: target, Params: params}))
 		case TypeCAA:
-			// RFC 8659: flags(1), tag-length(1), tag(tag-length bytes), value(rest).
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 2 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -381,19 +432,19 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 			}
 			tag := string(raw.Data[2 : 2+tagLen])
 			value := string(raw.Data[2+tagLen:])
-			out = append(out, &CAARecord{Header: hdr, Flags: flags, Tag: tag, Value: value})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_CAA,
+				&domainpb.CAARecord{Flags: uint32(flags), Tag: tag, Value: value}))
 		case TypeURI:
-			// RFC 7553: priority(2), weight(2), target(rest).
 			raw, err := p.UnknownResource()
 			if err != nil || len(raw.Data) < 4 {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
 			}
-			out = append(out, &URIRecord{
-				Header:   hdr,
-				Priority: uint16(raw.Data[0])<<8 | uint16(raw.Data[1]),
-				Weight:   uint16(raw.Data[2])<<8 | uint16(raw.Data[3]),
-				Target:   string(raw.Data[4:]),
-			})
+			out = append(out, newRecord(h, domainpb.DNSRecordType_URI,
+				&domainpb.URIRecord{
+					Priority: uint32(uint16(raw.Data[0])<<8 | uint16(raw.Data[1])),
+					Weight:   uint32(uint16(raw.Data[2])<<8 | uint16(raw.Data[3])),
+					Target:   string(raw.Data[4:]),
+				}))
 		default:
 			if err := p.SkipAnswer(); err != nil {
 				return nil, newDNSError(errCannotUnmarshalDNSMessage, name, server)
@@ -406,68 +457,33 @@ func parseGenericAnswers(p *dnsmessage.Parser, server, name string, qtype dnsmes
 // upstream's net.DefaultResolver convenience.
 var DefaultResolver = &Resolver{}
 
-// LookupA returns A (IPv4) records for name with TTLs preserved.
-// Equivalent to calling LookupRecords with dnsmessage.TypeA, but
-// type-narrowed to []*ARecord at the API.
-func (r *Resolver) LookupA(ctx context.Context, name string) ([]*ARecord, error) {
-	recs, _, err := r.goLookupIPCNAMEOrder(ctx, "ip4", name, nil)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*ARecord, 0, len(recs))
-	for _, rec := range recs {
-		if a, ok := rec.(*ARecord); ok {
-			out = append(out, a)
-		}
-	}
-	return out, nil
-}
-
-// LookupAAAA returns AAAA (IPv6) records for name with TTLs preserved.
-func (r *Resolver) LookupAAAA(ctx context.Context, name string) ([]*AAAARecord, error) {
-	recs, _, err := r.goLookupIPCNAMEOrder(ctx, "ip6", name, nil)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*AAAARecord, 0, len(recs))
-	for _, rec := range recs {
-		if aaaa, ok := rec.(*AAAARecord); ok {
-			out = append(out, aaaa)
-		}
-	}
-	return out, nil
-}
-
-// LookupIP returns A and AAAA records for name with TTLs preserved.
-// Returned records are *ARecord or *AAAARecord; callers can type-switch.
-func (r *Resolver) LookupIP(ctx context.Context, name string) ([]Record, error) {
+// LookupIP returns A and AAAA records for name. Each result has a Body
+// of *DNSRecord_A or *DNSRecord_Aaaa; callers can switch.
+func (r *Resolver) LookupIP(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
 	recs, _, err := r.goLookupIPCNAMEOrder(ctx, "ip", name, nil)
 	return recs, err
 }
 
 // LookupCNAME returns the canonical name of a host. Equivalent to
 // upstream's net.Resolver.LookupCNAME but reports an empty string when
-// no CNAME chain was followed (rather than echoing the queried name —
-// upstream-quirk we don't replicate).
+// no CNAME chain was followed.
 func (r *Resolver) LookupCNAME(ctx context.Context, host string) (string, error) {
 	return r.goLookupCNAME(ctx, host, nil)
 }
 
-// LookupNS returns NS records for name with TTLs preserved.
-func (r *Resolver) LookupNS(ctx context.Context, name string) ([]*NSRecord, error) {
+// LookupNS returns NS records for name.
+func (r *Resolver) LookupNS(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
 	return r.goLookupNS(ctx, name, nil)
 }
 
-// LookupMX returns MX records for name, sorted by preference, with
-// TTLs preserved.
-func (r *Resolver) LookupMX(ctx context.Context, name string) ([]*MXRecord, error) {
+// LookupMX returns MX records for name, sorted by preference.
+func (r *Resolver) LookupMX(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
 	return r.goLookupMX(ctx, name, nil)
 }
 
-// LookupTXT returns TXT records for name with TTLs preserved. Each
-// returned record's Strings field carries the raw character-string
-// fragments from the wire (most TXT records have exactly one).
-func (r *Resolver) LookupTXT(ctx context.Context, name string) ([]*TXTRecord, error) {
+// LookupTXT returns TXT records for name. Each record's TXTRecord.Strings
+// carries the raw character-string fragments from the wire.
+func (r *Resolver) LookupTXT(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
 	return r.goLookupTXT(ctx, name, nil)
 }
 
@@ -475,211 +491,76 @@ func (r *Resolver) LookupTXT(ctx context.Context, name string) ([]*TXTRecord, er
 // query (or for `name` directly when both service and proto are
 // empty). The returned records are sorted by priority + weight.
 // `cname` echoes any CNAME the answer chain reported.
+//
+// SRV isn't in the proto's body oneof yet, so this still returns the
+// local SRVRecord shape rather than *domainpb.DNSRecord.
 func (r *Resolver) LookupSRV(ctx context.Context, service, proto, name string) (cname string, records []*SRVRecord, err error) {
 	return r.goLookupSRV(ctx, service, proto, name, nil)
 }
 
-// LookupPTR returns PTR records for an IP literal (reverse DNS) with
-// TTLs preserved. Tries /etc/hosts first; falls back to the in-addr.arpa
-// or ip6.arpa name on the system resolver.
-func (r *Resolver) LookupPTR(ctx context.Context, addr string) ([]*PTRRecord, error) {
+// LookupPTR returns PTR records for an IP literal (reverse DNS).
+// PTR isn't in the proto's body oneof yet, so this returns presentation-
+// form target strings directly.
+func (r *Resolver) LookupPTR(ctx context.Context, addr string) ([]string, error) {
 	return r.goLookupPTR(ctx, addr, nil)
 }
 
-// LookupSOA returns SOA records for name with TTLs preserved. Most zones
-// have exactly one SOA; the slice form mirrors the other Lookup* methods.
-func (r *Resolver) LookupSOA(ctx context.Context, name string) ([]*SOARecord, error) {
-	recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeSOA)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*SOARecord, 0, len(recs))
-	for _, rec := range recs {
-		if soa, ok := rec.(*SOARecord); ok {
-			out = append(out, soa)
-		}
-	}
-	return out, nil
+// LookupSOA returns SOA records for name.
+func (r *Resolver) LookupSOA(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, dnsmessage.TypeSOA)
 }
 
 // LookupLOC returns LOC records (RFC 1876) for name.
-func (r *Resolver) LookupLOC(ctx context.Context, name string) ([]*LOCRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeLOC)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*LOCRecord, 0, len(recs))
-	for _, rec := range recs {
-		if l, ok := rec.(*LOCRecord); ok {
-			out = append(out, l)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupLOC(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeLOC)
 }
 
 // LookupHINFO returns HINFO records (RFC 1035 §3.3.2) for name.
-func (r *Resolver) LookupHINFO(ctx context.Context, name string) ([]*HINFORecord, error) {
-	recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeHINFO)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*HINFORecord, 0, len(recs))
-	for _, rec := range recs {
-		if h, ok := rec.(*HINFORecord); ok {
-			out = append(out, h)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupHINFO(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, dnsmessage.TypeHINFO)
 }
 
 // LookupRP returns RP records (RFC 1183) for name.
-func (r *Resolver) LookupRP(ctx context.Context, name string) ([]*RPRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeRP)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*RPRecord, 0, len(recs))
-	for _, rec := range recs {
-		if rp, ok := rec.(*RPRecord); ok {
-			out = append(out, rp)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupRP(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeRP)
 }
 
 // LookupAFSDB returns AFSDB records (RFC 1183) for name.
-func (r *Resolver) LookupAFSDB(ctx context.Context, name string) ([]*AFSDBRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeAFSDB)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*AFSDBRecord, 0, len(recs))
-	for _, rec := range recs {
-		if a, ok := rec.(*AFSDBRecord); ok {
-			out = append(out, a)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupAFSDB(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeAFSDB)
 }
 
 // LookupNAPTR returns NAPTR records (RFC 3403) for name.
-func (r *Resolver) LookupNAPTR(ctx context.Context, name string) ([]*NAPTRRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeNAPTR)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*NAPTRRecord, 0, len(recs))
-	for _, rec := range recs {
-		if n, ok := rec.(*NAPTRRecord); ok {
-			out = append(out, n)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupNAPTR(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeNAPTR)
 }
 
 // LookupKX returns KX records (RFC 2230) for name.
-func (r *Resolver) LookupKX(ctx context.Context, name string) ([]*KXRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeKX)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*KXRecord, 0, len(recs))
-	for _, rec := range recs {
-		if kx, ok := rec.(*KXRecord); ok {
-			out = append(out, kx)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupKX(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeKX)
 }
 
 // LookupSSHFP returns SSHFP records (RFC 4255) for name.
-func (r *Resolver) LookupSSHFP(ctx context.Context, name string) ([]*SSHFPRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeSSHFP)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*SSHFPRecord, 0, len(recs))
-	for _, rec := range recs {
-		if s, ok := rec.(*SSHFPRecord); ok {
-			out = append(out, s)
-		}
-	}
-	return out, nil
-}
-
-// LookupTLSA returns TLSA records (RFC 6698) for name. The conventional
-// owner name for a service is _<port>._<proto>.<host> (e.g.
-// "_443._tcp.example.com").
-func (r *Resolver) LookupTLSA(ctx context.Context, name string) ([]*TLSARecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeTLSA)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*TLSARecord, 0, len(recs))
-	for _, rec := range recs {
-		if t, ok := rec.(*TLSARecord); ok {
-			out = append(out, t)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupSSHFP(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeSSHFP)
 }
 
 // LookupSVCB returns SVCB records (RFC 9460) for name.
-func (r *Resolver) LookupSVCB(ctx context.Context, name string) ([]*SVCBRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeSVCB)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*SVCBRecord, 0, len(recs))
-	for _, rec := range recs {
-		if s, ok := rec.(*SVCBRecord); ok {
-			out = append(out, s)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupSVCB(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeSVCB)
 }
 
 // LookupHTTPS returns HTTPS records (RFC 9460) for name.
-func (r *Resolver) LookupHTTPS(ctx context.Context, name string) ([]*HTTPSRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeHTTPS)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*HTTPSRecord, 0, len(recs))
-	for _, rec := range recs {
-		if h, ok := rec.(*HTTPSRecord); ok {
-			out = append(out, h)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupHTTPS(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeHTTPS)
 }
 
 // LookupCAA returns CAA records (RFC 8659) for name.
-func (r *Resolver) LookupCAA(ctx context.Context, name string) ([]*CAARecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeCAA)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*CAARecord, 0, len(recs))
-	for _, rec := range recs {
-		if c, ok := rec.(*CAARecord); ok {
-			out = append(out, c)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupCAA(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeCAA)
 }
 
 // LookupURI returns URI records (RFC 7553) for name.
-func (r *Resolver) LookupURI(ctx context.Context, name string) ([]*URIRecord, error) {
-	recs, err := r.LookupRecords(ctx, name, TypeURI)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*URIRecord, 0, len(recs))
-	for _, rec := range recs {
-		if u, ok := rec.(*URIRecord); ok {
-			out = append(out, u)
-		}
-	}
-	return out, nil
+func (r *Resolver) LookupURI(ctx context.Context, name string) ([]*domainpb.DNSRecord, error) {
+	return r.LookupRecords(ctx, name, TypeURI)
 }
