@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -51,8 +52,15 @@ func TestResolveLocalhost(t *testing.T) {
 	}
 	hasLoopback := false
 	for _, r := range recs {
-		if r.GetText() == "127.0.0.1" || r.GetText() == "::1" {
-			hasLoopback = true
+		switch b := r.GetBody().(type) {
+		case *domainpb.DNSRecord_A:
+			if net.IP(b.A.GetIpv4()).String() == "127.0.0.1" {
+				hasLoopback = true
+			}
+		case *domainpb.DNSRecord_Aaaa:
+			if net.IP(b.Aaaa.GetIpv6()).String() == "::1" {
+				hasLoopback = true
+			}
 		}
 	}
 	if !hasLoopback {
@@ -76,17 +84,17 @@ func TestResolveSOA_Accretional(t *testing.T) {
 		Tld:      &domainpb.TLD{Format: &domainpb.TLD_Custom{Custom: "com"}},
 	}
 	recs := resolve(t, ctx, svc, dom)
-	var soaText string
+	var soa *domainpb.SOARecord
 	for _, r := range recs {
 		if r.GetType() == domainpb.DNSRecordType_SOA {
-			soaText = r.GetText()
+			soa = r.GetSoa()
 			break
 		}
 	}
-	if soaText == "" {
+	if soa == nil {
 		t.Skip("no SOA record returned — resolver or network issue?")
 	}
-	t.Logf("SOA text: %s", soaText)
+	t.Logf("SOA: ns=%s mbox=%s serial=%d", soa.GetNs(), soa.GetMbox(), soa.GetSerial())
 }
 
 // TestResolveNoSuchDomain verifies the resolver does not error or panic

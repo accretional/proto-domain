@@ -249,14 +249,198 @@ enum Class {
 }
 
 message DNSRecord {
+  // type is the DNS RR type code. Redundant with the body oneof case
+  // (the case selects the type), but kept as a top-level field so that
+  // walker code that doesn't switch on the body can still log/filter.
   DNSRecordType type = 1;
-  // Fully qualified domain name as per the DNS resource record spec. TODO - make sure this is the right structure
+
+  // target is the owner name the record belongs to (the FQDN we
+  // queried), not the RDATA inside the body.
   Domain target = 2;
+
   Class class = 3;
   int32 ttl_seconds = 4;
-  // TODO make indivudal dns record formats typed and oneof {} wrap them
-  oneof format {
-    bytes raw = 5;
-    string text = 6;
+
+  // body carries the typed RDATA for the record. Exactly one case is
+  // set per record. The case must match `type`; mismatches are caller
+  // bugs. Records for types not modelled here (DNSSEC types, ANY
+  // pseudo-responses, etc.) are not emitted at all — there is no raw
+  // fallback in this API.
+  oneof body {
+    ARecord a = 5;
+    AAAARecord aaaa = 6;
+    CNAMERecord cname = 7;
+    DNAMERecord dname = 8;
+    NSRecord ns = 9;
+    MXRecord mx = 10;
+    TXTRecord txt = 11;
+    SOARecord soa = 12;
+    LOCRecord loc = 13;
+    HINFORecord hinfo = 14;
+    RPRecord rp = 15;
+    AFSDBRecord afsdb = 16;
+    NAPTRRecord naptr = 17;
+    KXRecord kx = 18;
+    SSHFPRecord sshfp = 19;
+    SVCBRecord svcb = 20;
+    HTTPSRecord https = 21;
+    CAARecord caa = 22;
+    URIRecord uri = 23;
   }
+}
+
+// A is an IPv4 address record (RFC 1035). ipv4 is the wire 4-byte
+// address; callers can render with net.IP.
+message ARecord {
+  bytes ipv4 = 1;
+}
+
+// AAAA is an IPv6 address record (RFC 3596). ipv6 is the wire 16-byte
+// address.
+message AAAARecord {
+  bytes ipv6 = 1;
+}
+
+// CNAME is a canonical-name alias (RFC 1035). target is presentation
+// form with trailing dot.
+message CNAMERecord {
+  string target = 1;
+}
+
+// DNAME is a delegation-name record (RFC 6672). target is presentation
+// form with trailing dot.
+message DNAMERecord {
+  string target = 1;
+}
+
+// NS is an authoritative name-server record (RFC 1035). host is the
+// nameserver in presentation form with trailing dot.
+message NSRecord {
+  string host = 1;
+}
+
+// MX is a mail-exchange record (RFC 1035). pref is preference (lower
+// is preferred per RFC 5321); host is presentation form with dot.
+message MXRecord {
+  uint32 pref = 1;
+  string host = 2;
+}
+
+// TXT is a text record (RFC 1035 §3.3.14). strings is the wire-form
+// slice of character-string fragments; most callers concat with no
+// separator (which is what net.Resolver does).
+message TXTRecord {
+  repeated string strings = 1;
+}
+
+// SOA is a start-of-authority record (RFC 1035).
+message SOARecord {
+  string ns = 1;
+  string mbox = 2;
+  uint32 serial = 3;
+  uint32 refresh = 4;
+  uint32 retry = 5;
+  uint32 expire = 6;
+  uint32 min_ttl = 7;
+}
+
+// LOC is a location record (RFC 1876). latitude/longitude are
+// milli-arcseconds biased by 2^31 (equator/prime meridian = 2^31).
+// altitude is centimeters biased by 10_000_000 (0 = -100_000 m).
+// size, horiz_pre, vert_pre are precision bytes: high nibble is the
+// base-10 mantissa (1–9), low nibble the exponent in centimeters.
+message LOCRecord {
+  uint32 version = 1;
+  uint32 size = 2;
+  uint32 horiz_pre = 3;
+  uint32 vert_pre = 4;
+  uint32 latitude = 5;
+  uint32 longitude = 6;
+  uint32 altitude = 7;
+}
+
+// HINFO is a host-information record (RFC 1035 §3.3.2). Two
+// character-string fragments — cpu and os.
+message HINFORecord {
+  string cpu = 1;
+  string os = 2;
+}
+
+// RP is a responsible-person record (RFC 1183). Both fields are
+// presentation-form domain names.
+message RPRecord {
+  string mbox = 1;
+  string txt = 2;
+}
+
+// AFSDB is an AFS database record (RFC 1183). subtype 1 = AFS cell
+// database server; subtype 2 = DCE/NCA root cell directory node.
+message AFSDBRecord {
+  uint32 subtype = 1;
+  string hostname = 2;
+}
+
+// NAPTR is a naming-authority pointer (RFC 3403).
+message NAPTRRecord {
+  uint32 order = 1;
+  uint32 preference = 2;
+  string flags = 3;
+  string service = 4;
+  string regexp = 5;
+  string replacement = 6;
+}
+
+// KX is a key-exchanger record (RFC 2230).
+message KXRecord {
+  uint32 preference = 1;
+  string exchanger = 2;
+}
+
+// SSHFP is an SSH-fingerprint record (RFC 4255). algorithm: 1=RSA,
+// 2=DSA, 3=ECDSA, 4=Ed25519. fp_type: 1=SHA-1, 2=SHA-256.
+message SSHFPRecord {
+  uint32 algorithm = 1;
+  uint32 fp_type = 2;
+  bytes fingerprint = 3;
+}
+
+// SvcbParam is one SVCB/HTTPS service-parameter key-value pair
+// (RFC 9460). Used by SVCBRecord and HTTPSRecord.
+message SvcbParam {
+  uint32 key = 1;
+  bytes value = 2;
+}
+
+// SVCB is a service-binding record (RFC 9460). priority 0 means
+// AliasMode (target_name is an alias); any other value is ServiceMode.
+// target_name "." means the SVCB owner name itself.
+message SVCBRecord {
+  uint32 priority = 1;
+  string target_name = 2;
+  repeated SvcbParam params = 3;
+}
+
+// HTTPS is an HTTPS service-binding record (RFC 9460). Same wire
+// format as SVCB but a distinct RR type.
+message HTTPSRecord {
+  uint32 priority = 1;
+  string target_name = 2;
+  repeated SvcbParam params = 3;
+}
+
+// CAA is a certification-authority-authorization record (RFC 8659).
+// tag is typically "issue", "issuewild", or "iodef". flags bit 7
+// (0x01) is the issuer-critical flag.
+message CAARecord {
+  uint32 flags = 1;
+  string tag = 2;
+  string value = 3;
+}
+
+// URI is a URI record (RFC 7553). target is the full URI string
+// (e.g. "mailto:admin@example.com" or "tel:+15551234567").
+message URIRecord {
+  uint32 priority = 1;
+  uint32 weight = 2;
+  string target = 3;
 }

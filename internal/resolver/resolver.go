@@ -20,14 +20,15 @@
 //     lost to sequential — the bottleneck is the upstream resolver,
 //     not our orchestration, and a fast upstream (local unbound)
 //     benefits from sequential cache locality.
+//   - Each emitted DNSRecord carries a typed body in the proto schema
+//     — no presentation-form string. Clients walk the body oneof to
+//     access wire-faithful fields.
 //   - "No records" / NXDOMAIN per type is silently skipped.
 package resolver
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"net"
 	"strings"
 
@@ -88,58 +89,79 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		r = dns.DefaultResolver
 	}
 
-	emit := func(t domainpb.DNSRecordType, ttl uint32, text string) error {
-		return out.Send(&domainpb.DNSRecord{
-			Type:       t,
-			Target:     req,
-			Class:      domainpb.Class_Internet,
-			TtlSeconds: int32(ttl),
-			Format:     &domainpb.DNSRecord_Text{Text: text},
-		})
+	// send fills in the common fields (target/class) on a DNSRecord
+	// that the caller has already populated with type, ttl, and body,
+	// then hands it to the gRPC stream. Inlining body construction at
+	// each call site keeps the oneof case local and avoids needing to
+	// plumb the unexported isDNSRecord_Body interface.
+	send := func(rec *domainpb.DNSRecord) error {
+		rec.Target = req
+		rec.Class = domainpb.Class_Internet
+		return out.Send(rec)
 	}
 
-	// A + AAAA via the typed IP lookup. dns.Resolver.LookupIP returns
-	// []dns.Record (mix of *ARecord / *AAAARecord), each carrying its
-	// own TTL.
+	// A + AAAA via the typed IP lookup.
 	if recs, err := r.LookupIP(ctx, name); err == nil {
 		for _, rec := range recs {
 			switch v := rec.(type) {
 			case *dns.ARecord:
-				if err := emit(domainpb.DNSRecordType_A, v.TTL, v.IP.String()); err != nil {
+				ip4 := v.IP.To4()
+				if ip4 == nil {
+					continue
+				}
+				if err := send(&domainpb.DNSRecord{
+					Type:       domainpb.DNSRecordType_A,
+					TtlSeconds: int32(v.TTL),
+					Body:       &domainpb.DNSRecord_A{A: &domainpb.ARecord{Ipv4: ip4}},
+				}); err != nil {
 					return err
 				}
 			case *dns.AAAARecord:
-				if err := emit(domainpb.DNSRecordType_AAAA, v.TTL, v.IP.String()); err != nil {
+				ip16 := v.IP.To16()
+				if ip16 == nil {
+					continue
+				}
+				if err := send(&domainpb.DNSRecord{
+					Type:       domainpb.DNSRecordType_AAAA,
+					TtlSeconds: int32(v.TTL),
+					Body:       &domainpb.DNSRecord_Aaaa{Aaaa: &domainpb.AAAARecord{Ipv6: ip16}},
+				}); err != nil {
 					return err
 				}
 			}
 		}
 	}
 
-	// CNAME — single LookupRecords call gives both target and TTL,
-	// avoiding the original two-call (LookupCNAME + LookupRecords) path.
 	if recs, err := r.LookupRecords(ctx, name, dnsmessage.TypeCNAME); err == nil {
 		for _, rec := range recs {
 			cr, ok := rec.(*dns.CNAMERecord)
 			if !ok {
 				continue
 			}
-			if !strings.EqualFold(strings.TrimSuffix(cr.Target, "."), strings.TrimSuffix(name, ".")) {
-				if err := emit(domainpb.DNSRecordType_CNAME, cr.TTL, cr.Target); err != nil {
-					return err
-				}
+			if strings.EqualFold(strings.TrimSuffix(cr.Target, "."), strings.TrimSuffix(name, ".")) {
+				continue
+			}
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_CNAME,
+				TtlSeconds: int32(cr.TTL),
+				Body:       &domainpb.DNSRecord_Cname{Cname: &domainpb.CNAMERecord{Target: cr.Target}},
+			}); err != nil {
+				return err
 			}
 		}
 	}
 
-	// DNAME — RFC 6672: maps the entire subtree below the owner name.
 	if recs, err := r.LookupRecords(ctx, name, dns.TypeDNAME); err == nil {
 		for _, rec := range recs {
 			dr, ok := rec.(*dns.DNAMERecord)
 			if !ok {
 				continue
 			}
-			if err := emit(domainpb.DNSRecordType_DNAME, dr.TTL, dr.Target); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_DNAME,
+				TtlSeconds: int32(dr.TTL),
+				Body:       &domainpb.DNSRecord_Dname{Dname: &domainpb.DNAMERecord{Target: dr.Target}},
+			}); err != nil {
 				return err
 			}
 		}
@@ -147,7 +169,11 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if nss, err := r.LookupNS(ctx, name); err == nil {
 		for _, ns := range nss {
-			if err := emit(domainpb.DNSRecordType_NS, ns.TTL, ns.Host); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_NS,
+				TtlSeconds: int32(ns.TTL),
+				Body:       &domainpb.DNSRecord_Ns{Ns: &domainpb.NSRecord{Host: ns.Host}},
+			}); err != nil {
 				return err
 			}
 		}
@@ -155,7 +181,11 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if mxs, err := r.LookupMX(ctx, name); err == nil {
 		for _, mx := range mxs {
-			if err := emit(domainpb.DNSRecordType_MX, mx.TTL, fmt.Sprintf("%d %s", mx.Pref, mx.Host)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_MX,
+				TtlSeconds: int32(mx.TTL),
+				Body:       &domainpb.DNSRecord_Mx{Mx: &domainpb.MXRecord{Pref: uint32(mx.Pref), Host: mx.Host}},
+			}); err != nil {
 				return err
 			}
 		}
@@ -163,121 +193,200 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 
 	if txts, err := r.LookupTXT(ctx, name); err == nil {
 		for _, txt := range txts {
-			joined := strings.Join(txt.Strings, "")
-			if err := emit(domainpb.DNSRecordType_TXT, txt.TTL, joined); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_TXT,
+				TtlSeconds: int32(txt.TTL),
+				Body:       &domainpb.DNSRecord_Txt{Txt: &domainpb.TXTRecord{Strings: append([]string(nil), txt.Strings...)}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// SOA — zone file presentation: "<ns> <mbox> <serial> <refresh> <retry> <expire> <minttl>"
 	if soas, err := r.LookupSOA(ctx, name); err == nil {
 		for _, soa := range soas {
-			text := fmt.Sprintf("%s %s %d %d %d %d %d",
-				soa.NS, soa.MBox,
-				soa.Serial, soa.Refresh, soa.Retry, soa.Expire, soa.MinTTL)
-			if err := emit(domainpb.DNSRecordType_SOA, soa.TTL, text); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_SOA,
+				TtlSeconds: int32(soa.TTL),
+				Body: &domainpb.DNSRecord_Soa{Soa: &domainpb.SOARecord{
+					Ns:      soa.NS,
+					Mbox:    soa.MBox,
+					Serial:  soa.Serial,
+					Refresh: soa.Refresh,
+					Retry:   soa.Retry,
+					Expire:  soa.Expire,
+					MinTtl:  soa.MinTTL,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// LOC — RFC 1876, converted to "<lat-deg> <lon-deg> <alt-m>m size=<m> hp=<m> vp=<m>"
 	if recs, err := r.LookupLOC(ctx, name); err == nil {
 		for _, l := range recs {
-			if err := emit(domainpb.DNSRecordType_LOC, l.TTL, locText(l)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_LOC,
+				TtlSeconds: int32(l.TTL),
+				Body: &domainpb.DNSRecord_Loc{Loc: &domainpb.LOCRecord{
+					Version:   uint32(l.Version),
+					Size:      uint32(l.Size),
+					HorizPre:  uint32(l.HorizPre),
+					VertPre:   uint32(l.VertPre),
+					Latitude:  l.Latitude,
+					Longitude: l.Longitude,
+					Altitude:  l.Altitude,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// HINFO — RFC 1035 §3.3.2: "<cpu>" "<os>"
 	if recs, err := r.LookupHINFO(ctx, name); err == nil {
 		for _, h := range recs {
-			if err := emit(domainpb.DNSRecordType_HINFO, h.TTL, fmt.Sprintf("%q %q", h.CPU, h.OS)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_HINFO,
+				TtlSeconds: int32(h.TTL),
+				Body:       &domainpb.DNSRecord_Hinfo{Hinfo: &domainpb.HINFORecord{Cpu: h.CPU, Os: h.OS}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// RP — RFC 1183: <mbox> <txt>
 	if recs, err := r.LookupRP(ctx, name); err == nil {
 		for _, rp := range recs {
-			if err := emit(domainpb.DNSRecordType_RP, rp.TTL, fmt.Sprintf("%s %s", rp.Mbox, rp.Txt)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_RP,
+				TtlSeconds: int32(rp.TTL),
+				Body:       &domainpb.DNSRecord_Rp{Rp: &domainpb.RPRecord{Mbox: rp.Mbox, Txt: rp.Txt}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// AFSDB — RFC 1183: <subtype> <hostname>
 	if recs, err := r.LookupAFSDB(ctx, name); err == nil {
 		for _, a := range recs {
-			if err := emit(domainpb.DNSRecordType_AFSDB, a.TTL, fmt.Sprintf("%d %s", a.Subtype, a.Hostname)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_AFSDB,
+				TtlSeconds: int32(a.TTL),
+				Body: &domainpb.DNSRecord_Afsdb{Afsdb: &domainpb.AFSDBRecord{
+					Subtype: uint32(a.Subtype), Hostname: a.Hostname,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// NAPTR — RFC 3403: <order> <preference> "<flags>" "<service>" "<regexp>" <replacement>
 	if recs, err := r.LookupNAPTR(ctx, name); err == nil {
 		for _, n := range recs {
-			text := fmt.Sprintf("%d %d %q %q %q %s", n.Order, n.Preference, n.Flags, n.Service, n.Regexp, n.Replacement)
-			if err := emit(domainpb.DNSRecordType_NAPTR, n.TTL, text); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_NAPTR,
+				TtlSeconds: int32(n.TTL),
+				Body: &domainpb.DNSRecord_Naptr{Naptr: &domainpb.NAPTRRecord{
+					Order:       uint32(n.Order),
+					Preference:  uint32(n.Preference),
+					Flags:       n.Flags,
+					Service:     n.Service,
+					Regexp:      n.Regexp,
+					Replacement: n.Replacement,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// KX — RFC 2230: <preference> <exchanger>
 	if recs, err := r.LookupKX(ctx, name); err == nil {
 		for _, kx := range recs {
-			if err := emit(domainpb.DNSRecordType_KX, kx.TTL, fmt.Sprintf("%d %s", kx.Preference, kx.Exchanger)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_KX,
+				TtlSeconds: int32(kx.TTL),
+				Body: &domainpb.DNSRecord_Kx{Kx: &domainpb.KXRecord{
+					Preference: uint32(kx.Preference), Exchanger: kx.Exchanger,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// SSHFP — RFC 4255 presentation: <algorithm> <fptype> <hex-fingerprint>
 	if recs, err := r.LookupSSHFP(ctx, name); err == nil {
 		for _, s := range recs {
-			text := fmt.Sprintf("%d %d %s", s.Algorithm, s.FpType, hex.EncodeToString(s.Fingerprint))
-			if err := emit(domainpb.DNSRecordType_SSHFP, s.TTL, text); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_SSHFP,
+				TtlSeconds: int32(s.TTL),
+				Body: &domainpb.DNSRecord_Sshfp{Sshfp: &domainpb.SSHFPRecord{
+					Algorithm:   uint32(s.Algorithm),
+					FpType:      uint32(s.FpType),
+					Fingerprint: append([]byte(nil), s.Fingerprint...),
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// SVCB — "<priority> <target> [key=hexval ...]"
 	if recs, err := r.LookupSVCB(ctx, name); err == nil {
 		for _, s := range recs {
-			if err := emit(domainpb.DNSRecordType_SVCB, s.TTL, svcbText(s.Priority, s.TargetName, s.Params)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_SVCB,
+				TtlSeconds: int32(s.TTL),
+				Body: &domainpb.DNSRecord_Svcb{Svcb: &domainpb.SVCBRecord{
+					Priority:   uint32(s.Priority),
+					TargetName: s.TargetName,
+					Params:     toSvcbParams(s.Params),
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// HTTPS — same presentation as SVCB, distinct type
 	if recs, err := r.LookupHTTPS(ctx, name); err == nil {
 		for _, h := range recs {
-			if err := emit(domainpb.DNSRecordType_HTTPS, h.TTL, svcbText(h.Priority, h.TargetName, h.Params)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_HTTPS,
+				TtlSeconds: int32(h.TTL),
+				Body: &domainpb.DNSRecord_Https{Https: &domainpb.HTTPSRecord{
+					Priority:   uint32(h.Priority),
+					TargetName: h.TargetName,
+					Params:     toSvcbParams(h.Params),
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// CAA — RFC 8659 presentation: <flags> <tag> "<value>"
 	if recs, err := r.LookupCAA(ctx, name); err == nil {
 		for _, c := range recs {
-			if err := emit(domainpb.DNSRecordType_CAA, c.TTL, fmt.Sprintf("%d %s %q", c.Flags, c.Tag, c.Value)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_CAA,
+				TtlSeconds: int32(c.TTL),
+				Body: &domainpb.DNSRecord_Caa{Caa: &domainpb.CAARecord{
+					Flags: uint32(c.Flags), Tag: c.Tag, Value: c.Value,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
 	}
 
-	// URI — RFC 7553 presentation: <priority> <weight> "<target>"
 	if recs, err := r.LookupURI(ctx, name); err == nil {
 		for _, u := range recs {
-			if err := emit(domainpb.DNSRecordType_URI, u.TTL, fmt.Sprintf("%d %d %q", u.Priority, u.Weight, u.Target)); err != nil {
+			if err := send(&domainpb.DNSRecord{
+				Type:       domainpb.DNSRecordType_URI,
+				TtlSeconds: int32(u.TTL),
+				Body: &domainpb.DNSRecord_Uri{Uri: &domainpb.URIRecord{
+					Priority: uint32(u.Priority),
+					Weight:   uint32(u.Weight),
+					Target:   u.Target,
+				}},
+			}); err != nil {
 				return err
 			}
 		}
@@ -286,44 +395,16 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 	return nil
 }
 
-// locText converts a LOC record (RFC 1876) to a compact, parseable form
-// preserving all wire fields: latitude and longitude as signed decimal
-// degrees, altitude in meters, and the three precision bytes decoded
-// to meters via locPrecision.
-func locText(l *dns.LOCRecord) string {
-	const latLonBias = 1 << 31   // equator / prime meridian
-	const altBiasCm = 10_000_000 // so that 0 == -100 000 m
-	latDeg := float64(int64(l.Latitude)-latLonBias) / 3_600_000.0
-	lonDeg := float64(int64(l.Longitude)-latLonBias) / 3_600_000.0
-	altM := float64(int64(l.Altitude)-altBiasCm) / 100.0
-	return fmt.Sprintf("%.6f %.6f %.2fm size=%s hp=%s vp=%s",
-		latDeg, lonDeg, altM,
-		locPrecision(l.Size), locPrecision(l.HorizPre), locPrecision(l.VertPre))
-}
-
-// locPrecision decodes an RFC 1876 precision byte. High nibble is the
-// mantissa (1–9), low nibble the base-10 exponent in centimeters.
-// Returns the value in meters with "m" suffix.
-func locPrecision(b uint8) string {
-	mant := float64(b >> 4)
-	exp := int(b & 0x0F)
-	cm := mant
-	for i := 0; i < exp; i++ {
-		cm *= 10
+// toSvcbParams converts wire-parse SVCB params to proto form.
+func toSvcbParams(in []dns.SVCBParam) []*domainpb.SvcbParam {
+	if len(in) == 0 {
+		return nil
 	}
-	return fmt.Sprintf("%.2fm", cm/100.0)
-}
-
-// svcbText formats SVCB/HTTPS record text. Params are rendered as
-// key=hexval pairs; callers that need parsed param values should use
-// dns.LookupSVCB / dns.LookupHTTPS directly.
-func svcbText(priority uint16, target string, params []dns.SVCBParam) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d %s", priority, target)
-	for _, p := range params {
-		fmt.Fprintf(&b, " %d=%s", p.Key, hex.EncodeToString(p.Value))
+	out := make([]*domainpb.SvcbParam, len(in))
+	for i, p := range in {
+		out[i] = &domainpb.SvcbParam{Key: uint32(p.Key), Value: append([]byte(nil), p.Value...)}
 	}
-	return b.String()
+	return out
 }
 
 // canonicalName recovers the queryable string from a Domain message and
