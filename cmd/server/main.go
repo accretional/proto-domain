@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -19,7 +21,8 @@ import (
 func main() {
 	addr := flag.String("addr", "", "listen address (host:port). overrides -port if set")
 	port := flag.Int("port", 50098, "listen port (used when -addr is empty)")
-	upstream := flag.String("upstream", "", "force all DNS queries to this addr (host:port). Empty = use /etc/resolv.conf")
+	upstream := flag.String("upstream", "", "comma-separated upstream resolver addrs (host:port). Empty = use /etc/resolv.conf. Multiple addrs round-robin per RPC.")
+	statsInterval := flag.Duration("upstream-stats-interval", 60*time.Second, "interval for per-upstream RPC stats log line; 0 disables")
 	flag.Parse()
 
 	bind := *addr
@@ -34,20 +37,34 @@ func main() {
 
 	srv := grpc.NewServer()
 	var svc *resolver.Service
+	var upstreams []string
 	if *upstream != "" {
-		svc = resolver.NewWithUpstream(*upstream)
+		for _, a := range strings.Split(*upstream, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				upstreams = append(upstreams, a)
+			}
+		}
+		svc = resolver.NewWithUpstreams(upstreams)
 	} else {
 		svc = resolver.New()
 	}
 	domainpb.RegisterResolverServer(srv, svc)
 
-	log.Printf("resolver listening on %s (upstream=%q)", lis.Addr(), *upstream)
+	var stopStats func()
+	if *statsInterval > 0 {
+		stopStats = svc.LogUpstreamStats(*statsInterval)
+	}
+
+	log.Printf("resolver listening on %s (upstreams=%v)", lis.Addr(), upstreams)
 
 	go func() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 		<-ch
 		log.Print("shutting down")
+		if stopStats != nil {
+			stopStats()
+		}
 		srv.GracefulStop()
 	}()
 

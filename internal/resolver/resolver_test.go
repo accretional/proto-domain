@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/accretional/proto-domain/dns"
 	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
 
@@ -119,6 +120,41 @@ func TestResolveNoSuchDomain(t *testing.T) {
 	// Some misconfigured resolvers wildcard the invalid TLD; we don't
 	// assert len==0. We just want no panic and no error.
 	_ = resolve(t, ctx, svc, dom)
+}
+
+// TestPickResolver_RoundRobin verifies that with multiple upstreams the
+// service rotates them deterministically and that per-upstream RPC
+// counters reflect the rotation.
+func TestPickResolver_RoundRobin(t *testing.T) {
+	addrs := []string{"127.0.0.1:5301", "127.0.0.1:5302", "127.0.0.1:5303"}
+	svc := NewWithUpstreams(addrs)
+
+	got := make([]*dns.Resolver, 9)
+	for i := range got {
+		got[i] = svc.pickResolver()
+	}
+	// 9 picks across 3 upstreams → each picked 3 times, in rotation.
+	expectIdx := func(call int) int { return call % 3 }
+	for i, r := range got {
+		want := svc.pool[expectIdx(i)].r
+		if r != want {
+			t.Errorf("pick %d: got resolver %p want %p", i, r, want)
+		}
+	}
+	for i, u := range svc.pool {
+		if got := u.rpcs.Load(); got != 3 {
+			t.Errorf("upstream %d (%s): rpcs counter = %d, want 3", i, u.addr, got)
+		}
+	}
+}
+
+// TestPickResolver_EmptyPool returns nil so the caller can fall back to
+// the default system resolver.
+func TestPickResolver_EmptyPool(t *testing.T) {
+	svc := New()
+	if r := svc.pickResolver(); r != nil {
+		t.Errorf("expected nil from empty pool, got %v", r)
+	}
 }
 
 // TestIsNXDOMAIN checks the helper recognises stdlib *net.DNSError with
