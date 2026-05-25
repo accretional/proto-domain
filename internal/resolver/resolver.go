@@ -15,6 +15,10 @@
 //     TLSA omitted (canonical owner is _<port>._<proto>.<host>, not
 //     the apex). DNSSEC types intentionally excluded.
 //   - Lookups are issued sequentially.
+//   - The first lookup (LookupIP) doubles as a presence probe: if it
+//     returns NXDOMAIN, the name doesn't exist for any type (RFC 2308),
+//     so the remaining 17 lookups are skipped. This saves ~17× of the
+//     per-domain work on dead names.
 //   - The dns/ layer already returns *domainpb.DNSRecord with Type,
 //     TtlSeconds, and Body populated; this service just sets the
 //     caller-owned Target and Class fields and forwards to the stream.
@@ -120,7 +124,14 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		return nil
 	}
 
-	if err := emit(r.LookupIP(ctx, name)); err != nil {
+	ipRecs, ipErr := r.LookupIP(ctx, name)
+	if isNXDOMAIN(ipErr) {
+		// RFC 2308: NXDOMAIN means the name doesn't exist for any type.
+		// Skip the remaining 17 lookups — they would all return the same
+		// negative result.
+		return nil
+	}
+	if err := emit(ipRecs, ipErr); err != nil {
 		return err
 	}
 	if err := emitCNAME(r.LookupRecords(ctx, name, dnsmessage.TypeCNAME)); err != nil {
@@ -175,6 +186,20 @@ func (s *Service) resolveStream(ctx context.Context, req *domainpb.Domain, out r
 		return err
 	}
 	return nil
+}
+
+// isNXDOMAIN reports whether err is the dns/ layer's "name doesn't
+// exist" signal. The dns/ layer surfaces NXDOMAIN as *net.DNSError
+// with IsNotFound=true, mirroring stdlib's net package.
+func isNXDOMAIN(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.IsNotFound
+	}
+	return false
 }
 
 // canonicalName recovers the queryable string from a Domain message and

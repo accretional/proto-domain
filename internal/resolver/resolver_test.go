@@ -2,12 +2,18 @@ package resolver
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	domainpb "github.com/accretional/proto-domain/proto/domainpb"
 )
+
+var errFakePlain = errors.New("not a dns error")
+
+func wrappedErr(e error) error { return fmt.Errorf("wrapped: %w", e) }
 
 // collector is the in-memory recordSink the tests use to drive the
 // resolver without spinning up a gRPC server. Lives here rather than
@@ -113,4 +119,25 @@ func TestResolveNoSuchDomain(t *testing.T) {
 	// Some misconfigured resolvers wildcard the invalid TLD; we don't
 	// assert len==0. We just want no panic and no error.
 	_ = resolve(t, ctx, svc, dom)
+}
+
+// TestIsNXDOMAIN checks the helper recognises stdlib *net.DNSError with
+// IsNotFound=true and ignores other shapes.
+func TestIsNXDOMAIN(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"plain error", errFakePlain, false},
+		{"DNSError IsNotFound=false", &net.DNSError{IsNotFound: false}, false},
+		{"DNSError IsNotFound=true", &net.DNSError{IsNotFound: true}, true},
+		{"wrapped DNSError IsNotFound=true", wrappedErr(&net.DNSError{IsNotFound: true}), true},
+	}
+	for _, c := range cases {
+		if got := isNXDOMAIN(c.err); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
 }
