@@ -70,6 +70,7 @@ PROTO_FILES=(
     "$PROTO_DIR"/domain.proto
     "$PROTO_DIR"/dns_record.proto
     "$PROTO_DIR"/resolver.proto
+    "$PROTO_DIR"/rdap.proto
     "$URL_PROTO_DIR"/url.proto
 )
 
@@ -84,6 +85,9 @@ for src in "${PROTO_FILES[@]}"; do
     fi
 done
 if [[ ! -f "$PROTO_DIR/resolver_grpc.pb.go" ]]; then
+    NEED_REGEN=true
+fi
+if [[ ! -f "$PROTO_DIR/rdap_grpc.pb.go" ]]; then
     NEED_REGEN=true
 fi
 if [[ ! -f "$URL_PROTO_DIR/url.pb.go" ]]; then

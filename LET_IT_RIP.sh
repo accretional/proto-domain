@@ -76,6 +76,47 @@ else
 fi
 
 echo ""
+echo "=== Smoke test: RDAPResolver server + client ==="
+
+RDAP_PORT=50099
+echo "  Starting rdap-server on port $RDAP_PORT..."
+bin/rdap-server -port "$RDAP_PORT" &
+RDAP_PID=$!
+
+rdap_cleanup() {
+    echo "  Stopping rdap-server (PID $RDAP_PID)..."
+    kill "$RDAP_PID" 2>/dev/null || true
+    wait "$RDAP_PID" 2>/dev/null || true
+}
+trap rdap_cleanup EXIT
+
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if nc -z localhost "$RDAP_PORT" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+
+if ! kill -0 "$RDAP_PID" 2>/dev/null; then
+    echo "  ERROR: rdap-server failed to start"
+    exit 1
+fi
+
+echo "  RDAP lookup: example.com (IANA example domain)..."
+bin/rdap-client -addr "localhost:$RDAP_PORT" example.com
+echo ""
+
+echo "  RDAP lookup: google.com..."
+bin/rdap-client -addr "localhost:$RDAP_PORT" google.com
+echo ""
+
+echo "  RDAP lookup: accretional.com..."
+bin/rdap-client -addr "localhost:$RDAP_PORT" accretional.com || true
+echo ""
+
+echo "  ✓ RDAP smoke tests passed"
+echo ""
+
 echo "=== Long fuzz pass (10s per grammar, single worker) ==="
 # -parallel=1 keeps fuzzing to one worker so we don't saturate the host.
 go test -run=NONE -fuzz=FuzzDomain   -fuzztime=10s -parallel=1 ./internal/grammar

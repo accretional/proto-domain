@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package domain;
+
+option go_package = "github.com/accretional/proto-domain/proto/domainpb;domainpb";
+
+import "proto/domainpb/domain.proto";
+import "proto/ippb/rdap.proto";
+
+// RDAPNameserver is a nameserver object from an RDAP domain response
+// (RFC 7483 §10.2.2). Glue addresses are included when present.
+message RDAPNameserver {
+  string handle = 1;
+  // LDH (letters-digits-hyphens) form of the nameserver hostname.
+  string ldh_name = 2;
+  // Unicode/IDN form, populated only for internationalised names.
+  string unicode_name = 3;
+  repeated ip.RDAPStatus status = 4;
+  repeated string links = 5;
+  // Glue IPv4 addresses (text form), when returned by the registry.
+  repeated string ipv4_addresses = 6;
+  // Glue IPv6 addresses (text form), when returned by the registry.
+  repeated string ipv6_addresses = 7;
+}
+
+// RDAPDSData is one DS record from the secureDNS.dsData array
+// (RFC 7483 §10.2.5, RFC 4034 §5).
+message RDAPDSData {
+  uint32 key_tag = 1;
+  uint32 algorithm = 2;
+  uint32 digest_type = 3;
+  string digest = 4;
+}
+
+// RDAPKeyData is one DNSKEY record from the secureDNS.keyData array
+// (RFC 7483 §10.2.5, RFC 4034 §2).
+message RDAPKeyData {
+  uint32 flags = 1;
+  uint32 protocol = 2;
+  uint32 algorithm = 3;
+  string public_key = 4;
+}
+
+// RDAPSecureDNS carries the secureDNS object from an RDAP domain response
+// (RFC 7483 §10.2.5). All five RIRs and major gTLD registries populate this.
+message RDAPSecureDNS {
+  bool delegation_signed = 1;
+  bool zone_signed = 2;
+  bool check_signature_validity = 3;
+  uint32 max_sig_life = 4;
+  repeated RDAPDSData ds_data = 5;
+  repeated RDAPKeyData key_data = 6;
+}
+
+// RDAPDomain is the domain registration object returned by an RDAP registry.
+// It corresponds to the "domain" objectClassName from RFC 7483 §7.3.
+message RDAPDomain {
+  // Registry handle (e.g. "2138514_DOMAIN_COM-VRSN").
+  string handle = 1;
+  // LDH form of the domain name as returned by the registry.
+  string ldh_name = 2;
+  // Unicode/IDN form, populated only for internationalised names.
+  string unicode_name = 3;
+  repeated RDAPNameserver nameservers = 4;
+  RDAPSecureDNS secure_dns = 5;
+  repeated ip.RDAPStatus status = 6;
+  repeated ip.RDAPEntity entities = 7;
+  repeated ip.RDAPEvent events = 8;
+  // Self / alternate link hrefs from the RDAP links array.
+  repeated string links = 9;
+  // Base URL of the RDAP server that was queried.
+  string rdap_server = 10;
+  // RDAP conformance extensions declared by the server.
+  repeated string rdap_conformance = 11;
+  // WHOIS server hostname from the port43 field, if present.
+  string port43 = 12;
+}
+
+// RDAPDomainResponse wraps the parsed domain registration record.
+message RDAPDomainResponse {
+  RDAPDomain domain = 1;
+  // Full RDAP JSON response body, preserved for callers that need
+  // fields not modelled in RDAPDomain.
+  string raw_json = 2;
+}
+
+// RDAPResolver performs RDAP registration lookups for domain names.
+// It uses the IANA bootstrap registry (RFC 7484) to route each query
+// to the correct registry operator.
+service RDAPResolver {
+  // LookupDomain queries the RDAP registry for a domain name.
+  // The TLD is used to route the query via the IANA bootstrap file.
+  rpc LookupDomain(Domain) returns (RDAPDomainResponse);
+}

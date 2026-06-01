@@ -21,6 +21,12 @@ go build -o bin/server ./cmd/server
 echo "  Building client..."
 go build -o bin/client ./cmd/client
 
+echo "  Building rdap-server..."
+go build -o bin/rdap-server ./cmd/rdap-server
+
+echo "  Building rdap-client..."
+go build -o bin/rdap-client ./cmd/rdap-client
+
 echo "  Binaries:"
 ls -lh bin/
 echo "=== build.sh complete ==="
