@@ -25,9 +25,18 @@ func main() {
 	statsInterval := flag.Duration("upstream-stats-interval", 60*time.Second, "interval for per-upstream RPC stats log line; 0 disables")
 	flag.Parse()
 
+	// Container-platform conventions (Cloud Run et al): PORT overrides the
+	// default port, UPSTREAM supplies -upstream, when the flags are unset.
 	bind := *addr
 	if bind == "" {
-		bind = ":" + itoa(*port)
+		if p := os.Getenv("PORT"); p != "" {
+			bind = ":" + p
+		} else {
+			bind = ":" + itoa(*port)
+		}
+	}
+	if *upstream == "" {
+		*upstream = os.Getenv("UPSTREAM")
 	}
 
 	lis, err := net.Listen("tcp", bind)

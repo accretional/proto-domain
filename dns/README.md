@@ -26,13 +26,17 @@ behavior + visible TTLs.
 
 Sources are adapted from these files in the Go standard library:
 
-| Local file       | Upstream file (in `$GOROOT/src/net/`) | Purpose                          |
-|------------------|---------------------------------------|----------------------------------|
-| `dns.go`         | `dnsclient.go`                        | Typed records, helpers           |
-| `config.go`      | `dnsconfig.go` + `dnsconfig_unix.go`  | resolv.conf parser, dnsConfig    |
-| `hosts.go`       | `hosts.go`                            | /etc/hosts file lookup           |
-| `client.go`      | `dnsclient_unix.go`                   | DNS query loop (UDP+TCP)         |
-| `lookup.go`      | `lookup.go` + `lookup_unix.go`        | High-level Lookup* with TTLs     |
+| Local file          | Upstream file (in `$GOROOT/src/net/`) | Purpose                          |
+|---------------------|---------------------------------------|----------------------------------|
+| `dnsclient.go`      | `dnsclient.go`                        | Typed records, helpers           |
+| `dnsconfig.go`      | `dnsconfig.go`                        | dnsConfig struct/defaults        |
+| `dnsconfig_unix.go` | `dnsconfig_unix.go`                   | resolv.conf parser               |
+| `hosts.go`          | `hosts.go`                            | /etc/hosts file lookup           |
+| `dnsclient_unix.go` | `dnsclient_unix.go`                   | DNS query loop (UDP+TCP)         |
+| `golookup.go`       | `lookup.go` + `lookup_unix.go`        | High-level Lookup* with TTLs     |
+
+(`lookup.go`, `net_helpers.go`, `sort.go` are our own glue, not forked
+files.)
 
 **Pinned upstream version**: see `UPSTREAM_VERSION` (a single-line file
 recording `go version` at the time of fork). Re-fork by overwriting the

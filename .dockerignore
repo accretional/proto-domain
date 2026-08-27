@@ -1,0 +1,11 @@
+# Keep the build context to source + vendor/ only. .git alone is multi-GB
+# (and once bloated the context to 6.7GB, filling the docker disk).
+.git
+.reindex
+reindex
+bin
+docs
+.claude
+.DS_Store
+Dockerfile
+deploy.sh

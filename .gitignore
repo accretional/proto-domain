@@ -18,7 +18,7 @@ coverage.*
 profile.cov
 
 # Dependency directories (remove the comment below to include it)
-# vendor/
+vendor/
 
 # Go workspace file
 go.work
@@ -33,3 +33,7 @@ go.work.sum
 
 # Build output (build.sh writes here)
 /bin/
+
+# Local reindex working data (multi-GB DBs; never commit)
+.reindex/
+/reindex
