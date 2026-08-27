@@ -57,7 +57,9 @@ export PATH="$GOBIN:$PATH"
 # Locate proto-ip checkout — needed because url.proto imports
 # proto/ippb/ip.proto. We resolve via go list so it follows whatever the
 # go.mod replace directive currently points at.
-PROTO_IP_DIR=$(go list -m -f '{{.Dir}}' github.com/accretional/proto-ip 2>/dev/null || true)
+# -mod=mod: module resolution must ignore vendor/ (created by deploy.sh),
+# which carries no per-module Dir for `go list -m`.
+PROTO_IP_DIR=$(go list -mod=mod -m -f '{{.Dir}}' github.com/accretional/proto-ip 2>/dev/null || true)
 if [[ -z "$PROTO_IP_DIR" || ! -d "$PROTO_IP_DIR" ]]; then
     echo "ERROR: cannot locate proto-ip module — check go.mod replace directive"
     exit 1
