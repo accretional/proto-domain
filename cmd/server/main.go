@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 
 	"github.com/accretional/proto-domain/internal/resolver"
 	domainpb "github.com/accretional/proto-domain/proto/domainpb"
@@ -58,6 +59,9 @@ func main() {
 		svc = resolver.New()
 	}
 	domainpb.RegisterResolverServer(srv, svc)
+	// Server reflection: lets grpcurl and other descriptor-less clients
+	// discover the service instead of needing the .proto files on hand.
+	reflection.Register(srv)
 
 	var stopStats func()
 	if *statsInterval > 0 {
